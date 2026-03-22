@@ -5,6 +5,7 @@
  */
 
 #include <dm.h>
+#include <dm/ofnode.h>
 #include <env.h>
 #include <log.h>
 #include <malloc.h>
@@ -29,6 +30,10 @@
 #include <version.h>
 #include <timestamp.h>
 #include <limits.h>
+#include <miiphy.h>
+#include <linux/mii.h>
+#include <timer.h>
+#include <asm/io.h>
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -42,6 +47,28 @@ DECLARE_GLOBAL_DATA_PTR;
 
 /* Delay before reboot after flashing completes, to let browser finish reads */
 #define REBOOT_DELAY_MS        3000
+#define RECOVERY_LED_PORTS     2
+#define RECOVERY_LED_POLL_MS   100
+
+#define RECOVERY_GPIO_SYSCTL_BASE      0x1fbf0200
+#define RECOVERY_CHIP_SCU_BASE         0x1fa20000
+#define RECOVERY_REG_GPIO_DATA         0x0004
+#define RECOVERY_REG_GPIO_OE           0x0014
+#define RECOVERY_REG_GPIO_CTRL         0x0000
+#define RECOVERY_REG_GPIO_CTRL1        0x0020
+#define RECOVERY_REG_GPIO_CTRL2        0x0060
+#define RECOVERY_REG_GPIO_CTRL3        0x0064
+#define RECOVERY_REG_GPIO_DATA1        0x0070
+#define RECOVERY_REG_GPIO_OE1          0x0078
+#define RECOVERY_REG_GPIO_2ND_I2C_MODE 0x0214
+#define RECOVERY_REG_GPIO_FLASH_MODE_CFG_EXT 0x0068
+
+#define RECOVERY_GPIO_LAN0_LED0_MODE_MASK BIT(3)
+#define RECOVERY_GPIO_LAN0_LED1_MODE_MASK BIT(4)
+#define RECOVERY_GPIO_LAN1_LED0_MODE_MASK BIT(5)
+#define RECOVERY_GPIO_LAN1_LED1_MODE_MASK BIT(6)
+#define RECOVERY_GPIO43_FLASH_MODE_CFG BIT(23)
+#define RECOVERY_GPIO44_FLASH_MODE_CFG BIT(24)
 
 static u8 *recv_base;
 static u32 recv_off;
@@ -90,6 +117,193 @@ struct recovery_target {
 	loff_t ofs;
 	unsigned long long limit;
 };
+
+struct recovery_led_ctrl {
+	struct udevice *mdio_dev;
+	ulong last_poll;
+};
+
+static const int recovery_led_phy_addrs[RECOVERY_LED_PORTS] = { 9, 10 };
+static const u8 recovery_green_led_gpios[RECOVERY_LED_PORTS] = { 43, 44 };
+static const u8 recovery_yellow_led_gpios[RECOVERY_LED_PORTS] = { 33, 34 };
+
+static void recovery_led_ctrl_free(struct recovery_led_ctrl *ctrl)
+{
+	memset(ctrl, 0, sizeof(*ctrl));
+}
+
+static void recovery_clrsetbits_le32(uintptr_t addr, u32 clear, u32 set)
+{
+	u32 val = readl((void __iomem *)addr);
+
+	val &= ~clear;
+	val |= set;
+	writel(val, (void __iomem *)addr);
+}
+
+static uintptr_t recovery_gpio_data_reg(u8 gpio)
+{
+	return RECOVERY_GPIO_SYSCTL_BASE +
+	       (gpio < 32 ? RECOVERY_REG_GPIO_DATA : RECOVERY_REG_GPIO_DATA1);
+}
+
+static uintptr_t recovery_gpio_oe_reg(u8 gpio)
+{
+	return RECOVERY_GPIO_SYSCTL_BASE +
+	       (gpio < 32 ? RECOVERY_REG_GPIO_OE : RECOVERY_REG_GPIO_OE1);
+}
+
+static uintptr_t recovery_gpio_dir_reg(u8 gpio)
+{
+	static const u16 dir_regs[] = {
+		RECOVERY_REG_GPIO_CTRL,
+		RECOVERY_REG_GPIO_CTRL1,
+		RECOVERY_REG_GPIO_CTRL2,
+		RECOVERY_REG_GPIO_CTRL3,
+	};
+
+	return RECOVERY_GPIO_SYSCTL_BASE + dir_regs[gpio / 16];
+}
+
+static void recovery_gpio_direction_output(u8 gpio)
+{
+	u32 bank_bit = BIT(gpio % 32);
+	u32 dir_bit = BIT(2 * (gpio % 16));
+
+	recovery_clrsetbits_le32(recovery_gpio_oe_reg(gpio), 0, bank_bit);
+	recovery_clrsetbits_le32(recovery_gpio_dir_reg(gpio), 0, dir_bit);
+}
+
+static void recovery_gpio_set_active_low(u8 gpio, int active)
+{
+	u32 bit = BIT(gpio % 32);
+	uintptr_t reg = recovery_gpio_data_reg(gpio);
+
+	recovery_clrsetbits_le32(reg, bit, active ? 0 : bit);
+}
+
+static void recovery_led_set_pin(u8 gpio, int on)
+{
+	recovery_gpio_set_active_low(gpio, on);
+}
+
+static int recovery_led_init(struct recovery_led_ctrl *ctrl)
+{
+	ofnode mdio_node;
+	int i, ret;
+
+	memset(ctrl, 0, sizeof(*ctrl));
+
+	/* Ensure LED1 pins are switched back to plain GPIO mode. */
+	recovery_clrsetbits_le32(RECOVERY_CHIP_SCU_BASE + RECOVERY_REG_GPIO_FLASH_MODE_CFG_EXT,
+				 0, RECOVERY_GPIO43_FLASH_MODE_CFG |
+				    RECOVERY_GPIO44_FLASH_MODE_CFG);
+
+	/* Make sure PHY LED mux is disabled so software can own the lines. */
+	recovery_clrsetbits_le32(RECOVERY_CHIP_SCU_BASE + RECOVERY_REG_GPIO_2ND_I2C_MODE,
+				 RECOVERY_GPIO_LAN0_LED0_MODE_MASK |
+				 RECOVERY_GPIO_LAN0_LED1_MODE_MASK |
+				 RECOVERY_GPIO_LAN1_LED0_MODE_MASK |
+				 RECOVERY_GPIO_LAN1_LED1_MODE_MASK, 0);
+
+	for (i = 0; i < RECOVERY_LED_PORTS; i++) {
+		recovery_gpio_direction_output(recovery_green_led_gpios[i]);
+		recovery_gpio_direction_output(recovery_yellow_led_gpios[i]);
+		recovery_led_set_pin(recovery_green_led_gpios[i], 0);
+		recovery_led_set_pin(recovery_yellow_led_gpios[i], 0);
+	}
+
+	mdio_node = ofnode_path("/soc/switch@1fb58000/mdio");
+	if (!ofnode_valid(mdio_node))
+		return 0;
+
+	ret = uclass_get_device_by_ofnode(UCLASS_MDIO, mdio_node, &ctrl->mdio_dev);
+	if (ret)
+		ctrl->mdio_dev = NULL;
+
+	return 0;
+}
+
+static int recovery_led_phy_speed(struct recovery_led_ctrl *ctrl, int idx)
+{
+	int bmcr, bmsr, stat1000, ctrl1000, lpa;
+
+	if (!ctrl->mdio_dev || idx >= ARRAY_SIZE(recovery_led_phy_addrs))
+		return 0;
+
+	bmsr = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
+			    MDIO_DEVAD_NONE, MII_BMSR);
+	if (bmsr < 0)
+		return 0;
+
+	bmsr = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
+			    MDIO_DEVAD_NONE, MII_BMSR);
+	if (bmsr < 0)
+		return 0;
+
+	if (!(bmsr & BMSR_LSTATUS))
+		return 0;
+
+	bmcr = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
+			    MDIO_DEVAD_NONE, MII_BMCR);
+	if (bmcr < 0)
+		return 0;
+
+	if (!(bmcr & BMCR_ANENABLE)) {
+		if (bmcr & BMCR_SPEED1000)
+			return SPEED_1000;
+		if (bmcr & BMCR_SPEED100)
+			return SPEED_100;
+
+		return SPEED_10;
+	}
+
+	stat1000 = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
+				MDIO_DEVAD_NONE, MII_STAT1000);
+	ctrl1000 = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
+				MDIO_DEVAD_NONE, MII_CTRL1000);
+	if (stat1000 >= 0 && ctrl1000 >= 0) {
+		stat1000 &= ctrl1000 << 2;
+		if (stat1000 & (PHY_1000BTSR_1000FD | PHY_1000BTSR_1000HD))
+			return SPEED_1000;
+	}
+
+	lpa = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
+			   MDIO_DEVAD_NONE, MII_ADVERTISE);
+	if (lpa < 0)
+		return SPEED_10;
+
+	bmsr = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
+			    MDIO_DEVAD_NONE, MII_LPA);
+	if (bmsr < 0)
+		return SPEED_10;
+
+	lpa &= bmsr;
+	if (lpa & (LPA_100FULL | LPA_100HALF))
+		return SPEED_100;
+
+	return SPEED_10;
+}
+
+static void recovery_led_poll(struct recovery_led_ctrl *ctrl)
+{
+	ulong now;
+	int i, speed;
+
+	now = get_timer(0);
+	if (ctrl->last_poll && now - ctrl->last_poll < RECOVERY_LED_POLL_MS)
+		return;
+
+	ctrl->last_poll = now;
+
+	for (i = 0; i < RECOVERY_LED_PORTS; i++) {
+		speed = recovery_led_phy_speed(ctrl, i);
+		recovery_led_set_pin(recovery_green_led_gpios[i],
+				     speed == SPEED_1000);
+		recovery_led_set_pin(recovery_yellow_led_gpios[i],
+				     speed == SPEED_10 || speed == SPEED_100);
+	}
+}
 
 static const char *recovery_default_target(enum upload_target tgt)
 {
@@ -716,27 +930,34 @@ int run_http_recovery(void)
 {
     struct udevice *udev;
     struct netif *netif;
+    struct recovery_led_ctrl leds;
+    int rx_len;
     int rc;
 
     recv_off = recv_total = 0;
     post_ok = 0;
     upload_done = 0;
+    recovery_led_init(&leds);
 
     rc = net_lwip_eth_start();
     if (rc < 0) {
         printf("Failed to start Ethernet: %d\n", rc);
+        recovery_led_ctrl_free(&leds);
         return rc;
     }
 
     udev = eth_get_dev();
     if (!udev) {
         printf("No active net device\n");
+        recovery_led_ctrl_free(&leds);
         return -ENODEV;
     }
 
     netif = net_lwip_new_netif(udev);
-    if (!netif)
+    if (!netif) {
+        recovery_led_ctrl_free(&leds);
         return -ENODEV;
+    }
 
     httpd_init();
     printf("HTTP recovery server listening on http://192.168.255.1/\n");
@@ -750,7 +971,8 @@ int run_http_recovery(void)
             }
         }
         /* net_lwip_rx() already runs sys_check_timeouts(). */
-        net_lwip_rx(udev, netif);
+        rx_len = net_lwip_rx(udev, netif);
+        recovery_led_poll(&leds);
         if (flash_request) {
             flash_request = 0;
             printf("Upload done, flashing...\n");
@@ -772,5 +994,6 @@ int run_http_recovery(void)
 
     net_lwip_remove_netif(netif);
     eth_halt();
+    recovery_led_ctrl_free(&leds);
     return 0;
 }
