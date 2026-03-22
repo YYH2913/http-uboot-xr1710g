@@ -15,6 +15,10 @@
 	compatible = "econet,xr1710g", "econet,en7581",
 		     "airoha,an7581", "airoha,en7581";
 	recovery-gpios = <&en7581_pinctrl 0 GPIO_ACTIVE_LOW>;
+	recovery-green-led-gpios = <&en7581_pinctrl 43 GPIO_ACTIVE_LOW>,
+				   <&en7581_pinctrl 44 GPIO_ACTIVE_LOW>;
+	recovery-yellow-led-gpios = <&en7581_pinctrl 33 GPIO_ACTIVE_LOW>,
+				    <&en7581_pinctrl 34 GPIO_ACTIVE_LOW>;
 
 	aliases {
 		serial0 = &uart1;
