@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>XR1710G Recovery</title>
+<style>
+:root{
+  --ink:#1a2530;
+  --muted:#677786;
+  --panel:#ffffff;
+  --panel-2:#f4f7f9;
+  --line:rgba(26,37,48,.1);
+  --accent:#de6b3a;
+  --accent-2:#348ea3;
+  --bg-1:#f7f4ef;
+  --bg-2:#eef3f6;
+  --bg-3:#ffffff;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;
+  min-height:100vh;
+  font-family:Georgia,"Times New Roman",serif;
+  color:var(--ink);
+  background:
+    radial-gradient(circle at top, rgba(222,107,58,.08), transparent 24%),
+    linear-gradient(180deg, var(--bg-1), var(--bg-2) 52%, var(--bg-3));
+}
+.shell{
+  max-width:860px;
+  margin:0 auto;
+  padding:30px 16px 42px;
+}
+.hero{
+  border:1px solid var(--line);
+  border-radius:24px;
+  padding:24px 22px 20px;
+  background:linear-gradient(180deg, var(--panel), var(--panel-2));
+  box-shadow:0 22px 50px rgba(26,37,48,.08);
+}
+.eyebrow{
+  margin:0;
+  letter-spacing:.18em;
+  text-transform:uppercase;
+  font-size:12px;
+  color:var(--muted);
+}
+h1{
+  margin:10px 0 8px;
+  font-size:36px;
+  line-height:1.02;
+}
+.lead,.meta,.note{
+  margin:0;
+  color:var(--muted);
+}
+.lead{font-size:15px}
+.meta{font-size:12px;margin-top:14px}
+.note{font-size:13px;margin-top:10px}
+.toolbar{
+  display:grid;
+  grid-template-columns:1.35fr .85fr auto;
+  gap:10px;
+  margin-top:22px;
+}
+input,select,button{
+  width:100%;
+  border-radius:14px;
+  font:inherit;
+}
+input,select{
+  border:1px solid rgba(26,37,48,.12);
+  padding:13px 14px;
+  color:#18232d;
+  background:#ffffff;
+}
+button{
+  border:0;
+  padding:13px 18px;
+  color:#fffaf8;
+  font-weight:700;
+  background:linear-gradient(90deg, var(--accent), #f59a5c);
+  cursor:pointer;
+}
+button.secondary{
+  background:linear-gradient(90deg, var(--accent-2), #63b6c5);
+}
+button:disabled{opacity:.6;cursor:default}
+.targets{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:12px;
+  margin-top:18px;
+}
+.target{
+  padding:16px;
+  border-radius:18px;
+  border:1px solid rgba(26,37,48,.08);
+  background:#fbfcfd;
+}
+.target.active{
+  border-color:rgba(222,107,58,.3);
+  background:linear-gradient(180deg, rgba(222,107,58,.08), rgba(255,255,255,1));
+}
+.target h2{
+  margin:0 0 8px;
+  font-size:20px;
+}
+.target p{
+  margin:0;
+  color:var(--muted);
+  line-height:1.5;
+  font-size:14px;
+}
+.progress{
+  display:none;
+  margin-top:20px;
+}
+.progress-row{margin-top:12px}
+.progress-label{
+  margin-bottom:6px;
+  color:#465662;
+  font-size:13px;
+}
+.progress-bar{
+  position:relative;
+  overflow:hidden;
+  border-radius:999px;
+  background:#e7edf1;
+  height:24px;
+}
+.progress-fill{
+  position:absolute;
+  inset:0 auto 0 0;
+  width:0;
+  background:linear-gradient(90deg, #6aa9db, #93ccef);
+  transition:width .25s ease;
+}
+.progress-fill.complete{
+  background:linear-gradient(90deg, var(--accent-2), #8ad7c9);
+}
+.progress-fill.inactive{
+  background:#d6dfe5;
+}
+.progress-text{
+  position:relative;
+  z-index:1;
+  line-height:24px;
+  text-align:center;
+  font-size:12px;
+}
+#reboot-msg{
+  display:none;
+  margin-top:14px;
+  color:#80502f;
+}
+#log{
+  margin-top:18px;
+  min-height:150px;
+  padding:14px;
+  white-space:pre-wrap;
+  border-radius:18px;
+  border:1px solid rgba(26,37,48,.1);
+  background:#f7fafc;
+  font:12px/1.5 "Courier New",monospace;
+  overflow:auto;
+}
+@media (max-width:720px){
+  .toolbar,.targets{grid-template-columns:1fr}
+  h1{font-size:30px}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <section class="hero">
+    <p class="eyebrow">XR1710G Recovery</p>
+    <h1>Upload firmware or chainloader</h1>
+    <p class="lead">Recovery endpoint: <strong>192.168.255.1</strong></p>
+    <p class="note">`firmware` writes `ubi:fit`, `uboot` writes the raw chainloader slot.</p>
+
+    <div class="targets">
+      <div class="target active" id="card-firmware">
+        <h2>firmware</h2>
+        <p>OpenWrt FIT image</p>
+      </div>
+      <div class="target" id="card-uboot">
+        <h2>uboot</h2>
+        <p>`xr1710g-chainloader-slot.bin`</p>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <input id="f" type="file">
+      <select id="t" onchange="changeTarget()">
+        <option value="firmware">firmware</option>
+        <option value="uboot">uboot</option>
+      </select>
+      <button id="btn" onclick="upload()">Upload</button>
+    </div>
+
+    <div class="progress" id="progress">
+      <div class="progress-row">
+        <div class="progress-label">Erase</div>
+        <div class="progress-bar">
+          <div class="progress-fill inactive" id="erase-fill"></div>
+          <div class="progress-text" id="erase-text">0%</div>
+        </div>
+      </div>
+      <div class="progress-row">
+        <div class="progress-label">Write</div>
+        <div class="progress-bar">
+          <div class="progress-fill inactive" id="write-fill"></div>
+          <div class="progress-text" id="write-text">0%</div>
+        </div>
+      </div>
+    </div>
+
+    <p id="reboot-msg">Flash complete. Rebooting in <strong id="reboot-sec">3</strong>s.</p>
+    <div id="log"></div>
+    <p class="meta" id="meta">Loading U-Boot version...</p>
+  </section>
+</div>
+<script>
+var pollTimer = null;
+var lastPhase = 0;
+var countdownStarted = false;
+
+function log(msg) {
+  var box = document.getElementById("log");
+  box.textContent += msg + "\n";
+  box.scrollTop = box.scrollHeight;
+}
+
+function changeTarget() {
+  var target = document.getElementById("t").value;
+  document.getElementById("card-firmware").className =
+    "target" + (target === "firmware" ? " active" : "");
+  document.getElementById("card-uboot").className =
+    "target" + (target === "uboot" ? " active" : "");
+  document.getElementById("btn").className =
+    target === "uboot" ? "secondary" : "";
+}
+
+function setProgress(phase, pct, detail) {
+  var eraseFill = document.getElementById("erase-fill");
+  var writeFill = document.getElementById("write-fill");
+  var eraseText = document.getElementById("erase-text");
+  var writeText = document.getElementById("write-text");
+
+  if (phase === 1) {
+    eraseFill.className = "progress-fill";
+    eraseFill.style.width = pct + "%";
+    eraseText.textContent = pct + "%" + detail;
+    writeFill.className = "progress-fill inactive";
+    writeFill.style.width = "0%";
+    writeText.textContent = "0%";
+    if (lastPhase !== 1) {
+      log("Erasing target...");
+      lastPhase = 1;
+    }
+  } else if (phase === 2) {
+    eraseFill.className = "progress-fill complete";
+    eraseFill.style.width = "100%";
+    eraseText.textContent = "100%";
+    writeFill.className = "progress-fill";
+    writeFill.style.width = pct + "%";
+    writeText.textContent = pct + "%" + detail;
+    if (lastPhase !== 2) {
+      log("Writing target...");
+      lastPhase = 2;
+    }
+  } else if (phase === 3) {
+    eraseFill.className = "progress-fill complete";
+    eraseFill.style.width = "100%";
+    eraseText.textContent = "100%";
+    writeFill.className = "progress-fill complete";
+    writeFill.style.width = "100%";
+    writeText.textContent = "100%";
+  }
+}
+
+function showProgress(show) {
+  document.getElementById("progress").style.display = show ? "block" : "none";
+}
+
+function startCountdown(seconds) {
+  if (countdownStarted)
+    return;
+  countdownStarted = true;
+  document.getElementById("reboot-msg").style.display = "block";
+  document.getElementById("reboot-sec").textContent = String(seconds);
+  function tick(left) {
+    if (left <= 0)
+      return;
+    document.getElementById("reboot-sec").textContent = String(left);
+    setTimeout(function() { tick(left - 1); }, 1000);
+  }
+  setTimeout(function() { tick(seconds - 1); }, 1000);
+}
+
+async function pollStatus() {
+  try {
+    var response = await fetch("/status");
+    var data = await response.json();
+    if (data.in_progress) {
+      var phase = data.phase || 0;
+      var pct = 0;
+      var detail = "";
+      if (phase === 1) {
+        pct = data.erase_total ? Math.round(data.erase_done * 100 / data.erase_total) : 0;
+        detail = " (" + Math.round((data.erase_done || 0) / 1024) + "KB/" +
+                 Math.round((data.erase_total || 0) / 1024) + "KB)";
+      } else if (phase === 2) {
+        pct = data.write_total ? Math.round(data.write_done * 100 / data.write_total) : 0;
+        detail = " (" + Math.round((data.write_done || 0) / 1024) + "KB/" +
+                 Math.round((data.write_total || 0) / 1024) + "KB)";
+      }
+      setProgress(phase, pct, detail);
+    } else if (data.ok) {
+      setProgress(3, 100, "");
+      log("Upload successful.");
+      startCountdown(3);
+      clearInterval(pollTimer);
+    } else if (data.error) {
+      log("Upload failed.");
+      clearInterval(pollTimer);
+      showProgress(false);
+      document.getElementById("btn").disabled = false;
+    }
+  } catch (err) {
+  }
+}
+
+async function upload() {
+  var btn = document.getElementById("btn");
+  var file = document.getElementById("f").files[0];
+  var target = document.getElementById("t").value;
+  if (!file) {
+    log("No file selected.");
+    return;
+  }
+
+  btn.disabled = true;
+  showProgress(true);
+  lastPhase = 0;
+  countdownStarted = false;
+  document.getElementById("reboot-msg").style.display = "none";
+  log("Uploading " + file.name + " to " + target + "...");
+  if (pollTimer)
+    clearInterval(pollTimer);
+  pollTimer = setInterval(pollStatus, 500);
+
+  try {
+    var response = await fetch("/upload/" + target, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file
+    });
+    if (!response.ok)
+      log("Server responded with HTTP " + response.status + ".");
+  } catch (err) {
+    log("Upload error: " + err);
+    clearInterval(pollTimer);
+    showProgress(false);
+    btn.disabled = false;
+  }
+}
+
+(async function() {
+  changeTarget();
+  try {
+    var response = await fetch("/about");
+    if (!response.ok)
+      return;
+    var data = await response.json();
+    if (data && data.u_boot)
+      document.getElementById("meta").textContent = data.u_boot;
+  } catch (err) {
+  }
+})();
+</script>
+</body>
+</html>

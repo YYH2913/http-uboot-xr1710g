@@ -161,6 +161,15 @@
 #define MEMP_MEM_INIT			1
 #define MEM_LIBC_MALLOC			1
 
+#if defined(CONFIG_HTTPD_RECOVERY)
+/*
+ * Recovery uses sys_timeout() for deferred flashing/reboot. Keep a few extra
+ * timeout slots available without depending on lwIP's internal opt.h state
+ * while this file is still being parsed.
+ */
+#define MEMP_NUM_SYS_TIMEOUT            8
+#endif
+
 #if CONFIG_IS_ENABLED(MBEDTLS_LIB_TLS)
 #define LWIP_ALTCP                      1
 #define LWIP_ALTCP_TLS                  1
@@ -169,6 +178,20 @@
 
 #if defined(CONFIG_CMD_SNTP)
 #define LWIP_DHCP_GET_NTP_SRV 1
+#endif
+
+#if defined(CONFIG_HTTPD_RECOVERY)
+#define LWIP_HTTPD_DYNAMIC_HEADERS              1
+#define LWIP_HTTPD_SUPPORT_POST                 1
+#define LWIP_HTTPD_CUSTOM_FILES                 1
+#define LWIP_HTTPD_CGI                          0
+#define LWIP_HTTPD_SSI                          0
+#define LWIP_HTTPD_MAX_REQ_LENGTH               4096
+#define LWIP_HTTPD_MAX_REQUEST_URI_LEN          64
+#define LWIP_HTTPD_POST_MAX_RESPONSE_URI_LEN    64
+#define LWIP_HTTPD_SUPPORT_REQUESTLIST          1
+#define LWIP_HTTPD_REQ_BUFSIZE                  8192
+#define LWIP_HTTPD_REQ_QUEUELEN                 20
 #endif
 
 #endif /* LWIP_UBOOT_LWIPOPTS_H */

@@ -2,6 +2,15 @@
 #
 # Copyright (C) 2024 Linaro Ltd.
 
+ifeq (y,$(CONFIG_HTTPD_RECOVERY))
+ccflags-y += -I$(srctree)/lib/lwip \
+	-DHTTPD_FSDATA_FILE=\"httpd/fsdata_xr1710g.c\" \
+	-Dfs_open=lwip_fs_open \
+	-Dfs_close=lwip_fs_close \
+	-Dfs_read=lwip_fs_read \
+	-Dfs_bytes_left=lwip_fs_bytes_left
+endif
+
 obj-y += \
 	lwip/src/api/api_lib.o \
 	lwip/src/api/api_msg.o \
@@ -12,7 +21,6 @@ obj-y += \
 	lwip/src/api/netifapi.o \
 	lwip/src/api/sockets.o \
 	lwip/src/api/tcpip.o \
-	lwip/src/apps/http/http_client.o \
 	lwip/src/apps/sntp/sntp.o \
 	lwip/src/apps/tftp/tftp.o \
 	lwip/src/core/altcp_alloc.o \
@@ -54,6 +62,11 @@ obj-y += \
 	lwip/src/core/timeouts.o \
 	lwip/src/core/udp.o \
 	lwip/src/netif/ethernet.o
+
+obj-$(CONFIG_WGET) += lwip/src/apps/http/http_client.o
+obj-$(CONFIG_HTTPD_RECOVERY) += \
+	lwip/src/apps/http/httpd.o \
+	lwip/src/apps/http/fs.o
 
 obj-$(CONFIG_$(PHASE_)MBEDTLS_LIB_TLS) += lwip/src/apps/altcp_tls/altcp_tls_mbedtls.o \
 	lwip/src/apps/altcp_tls/altcp_tls_mbedtls_mem.o

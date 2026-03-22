@@ -57,6 +57,7 @@
 		switch: switch@1fb58000 {
 			compatible = "airoha,en7581-switch";
 			reg = <0 0x1fb58000 0 0x8000>;
+			resets = <&scuclk EN7581_GSW_RST>;
 
 			mdio: mdio {
 				#address-cells = <1>;

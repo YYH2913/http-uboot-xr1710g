@@ -72,6 +72,15 @@ config LWIP_TCP_WND
 	  but QEMU with "-net user" needs no more than a few KB or the
 	  transfer will stall and eventually time out.
 
+config HTTPD_RECOVERY
+	bool "Enable simple lwIP httpd recovery server"
+	depends on NET_LWIP
+	select PROT_TCP_LWIP
+	help
+	  Build a minimal HTTP upload recovery server that listens on
+	  192.168.255.1 and flashes uploaded images to MTD partitions or
+	  UBI volumes selected through recovery_* environment variables.
+
 config USE_TFTPSERVERIP
 	bool "Set a default 'tftpserverip' value in the environment"
 	depends on CMD_TFTPBOOT

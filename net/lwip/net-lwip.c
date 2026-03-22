@@ -40,26 +40,35 @@ static err_t net_lwip_tx(struct netif *netif, struct pbuf *p)
 {
 	struct udevice *udev = netif->state;
 	void *pp = NULL;
+	u16_t tx_len = p->tot_len;
 	int err;
 
 	if (CONFIG_IS_ENABLED(LWIP_DEBUG_RXTX)) {
-		printf("net_lwip_tx: %u bytes, udev %s\n", p->len, udev->name);
+		printf("net_lwip_tx: %u bytes, udev %s\n", tx_len, udev->name);
 		print_hex_dump("net_lwip_tx: ", 0, 16, 1, p->payload, p->len,
 			       true);
 	}
 
-	if ((unsigned long)p->payload % PKTALIGN) {
+	/*
+	 * lwIP may hand us a chained pbuf for TCP payload. The U-Boot ethernet
+	 * drivers expect one contiguous frame buffer, so flatten the full
+	 * packet whenever the first payload is unaligned or the pbuf is chained.
+	 */
+	if (p->next || ((unsigned long)p->payload % PKTALIGN)) {
 		/*
 		 * Some net drivers have strict alignment requirements and may
 		 * fail or output invalid data if the packet is not aligned.
 		 */
-		pp = memalign(PKTALIGN, p->len);
+		pp = memalign(PKTALIGN, tx_len);
 		if (!pp)
 			return ERR_ABRT;
-		memcpy(pp, p->payload, p->len);
+		if (pbuf_copy_partial(p, pp, tx_len, 0) != tx_len) {
+			free(pp);
+			return ERR_ABRT;
+		}
 	}
 
-	err = eth_get_ops(udev)->send(udev, pp ? pp : p->payload, p->len);
+	err = eth_get_ops(udev)->send(udev, pp ? pp : p->payload, tx_len);
 	free(pp);
 	if (err) {
 		debug("send error %d\n", err);
