@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: GPL-2.0+
+
+#include "an7581-u-boot.dtsi"
+
+/ {
+	/*
+	 * The stock first-stage loader does not populate RAM size for the
+	 * second-stage image, so describe the verified 2 GiB layout here.
+	 */
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x80000000>;
+	};
+};
+
+&snfi {
+	status = "okay";
+};
+
+&switch {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&mdio_pins>;
+	/*
+	 * XR1710G exposes recovery Ethernet through external PHYs at MDIO
+	 * addresses 5 and 8, so the switch must poll that window instead of
+	 * the upstream default.
+	 */
+	airoha,phy-poll-start = <5>;
+	airoha,phy-poll-end = <10>;
+
+	mdio {
+		phy5: ethernet-phy@5 {
+			compatible = "ethernet-phy-ieee802.3-c45";
+			reg = <5>;
+			reset-gpios = <&en7581_pinctrl 46 GPIO_ACTIVE_LOW>;
+			reset-assert-us = <40000>;
+			reset-deassert-us = <150000>;
+			interrupt-parent = <&en7581_pinctrl>;
+			interrupts = <22 IRQ_TYPE_LEVEL_LOW>;
+			realtek,pnswap-tx;
+			realtek,pnswap-rx;
+		};
+
+		phy8: ethernet-phy@8 {
+			compatible = "ethernet-phy-ieee802.3-c45";
+			reg = <8>;
+			reset-gpios = <&en7581_pinctrl 31 GPIO_ACTIVE_LOW>;
+			reset-assert-us = <40000>;
+			reset-deassert-us = <150000>;
+			interrupt-parent = <&en7581_pinctrl>;
+			interrupts = <23 IRQ_TYPE_LEVEL_LOW>;
+			realtek,pnswap-tx;
+			realtek,pnswap-rx;
+		};
+	};
+};
