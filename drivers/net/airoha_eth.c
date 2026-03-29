@@ -642,6 +642,7 @@ struct airoha_eth {
 	struct regmap *scu_regmap;
 	struct regmap *chip_scu_regmap;
 	struct udevice *mdio_dev;
+	struct udevice *switch_mdio_dev;
 	struct reset_ctl_bulk rsts;
 	struct reset_ctl_bulk xsi_rsts;
 	struct reset_ctl switch_rst;
@@ -677,6 +678,8 @@ struct airoha_eth_soc_data {
 	const char *const *xsi_rsts_names;
 	const char *switch_compatible;
 };
+
+static bool airoha_rtl8261_is_phy_addr(int phy_addr);
 
 enum {
 	FE_PSE_PORT_CDM1,
@@ -1707,9 +1710,12 @@ static void airoha_fe_maccr_init(struct airoha_eth *eth)
 static int airoha_mdio_read_lstatus(struct airoha_eth *eth, int addr, int devad,
 				    int reg)
 {
+	struct udevice *mdio_dev;
 	int val;
 
-	if (!eth->mdio_dev)
+	mdio_dev = airoha_rtl8261_is_phy_addr(addr) ? eth->mdio_dev :
+		   (eth->switch_mdio_dev ? eth->switch_mdio_dev : eth->mdio_dev);
+	if (!mdio_dev)
 		return -ENODEV;
 
 	/*
@@ -1718,59 +1724,75 @@ static int airoha_mdio_read_lstatus(struct airoha_eth *eth, int addr, int devad,
 	 * to an unused/read-only register before each real read so subsequent
 	 * Clause 45 TOP/VEND1 accesses do not inherit an old value.
 	 */
-	if (!ofnode_device_is_compatible(dev_ofnode(eth->mdio_dev),
+	if (!ofnode_device_is_compatible(dev_ofnode(mdio_dev),
 					 "airoha,arht-mdio"))
-		dm_mdio_write(eth->mdio_dev, 0, MDIO_DEVAD_NONE, MII_BMSR, 0x1);
-	val = dm_mdio_read(eth->mdio_dev, addr, devad, reg);
+		dm_mdio_write(mdio_dev, 0, MDIO_DEVAD_NONE, MII_BMSR, 0x1);
+	val = dm_mdio_read(mdio_dev, addr, devad, reg);
 	if (val < 0)
 		return val;
 
 	/* Link state is latched; a second read returns the current state. */
-	if (!ofnode_device_is_compatible(dev_ofnode(eth->mdio_dev),
+	if (!ofnode_device_is_compatible(dev_ofnode(mdio_dev),
 					 "airoha,arht-mdio"))
-		dm_mdio_write(eth->mdio_dev, 0, MDIO_DEVAD_NONE, MII_BMSR, 0x1);
-	return dm_mdio_read(eth->mdio_dev, addr, devad, reg);
+		dm_mdio_write(mdio_dev, 0, MDIO_DEVAD_NONE, MII_BMSR, 0x1);
+	return dm_mdio_read(mdio_dev, addr, devad, reg);
 }
 
 static int airoha_mdio_c45_read(struct airoha_eth *eth, int addr, int devad,
 				int reg)
 {
-	if (!eth->mdio_dev)
+	struct udevice *mdio_dev;
+
+	mdio_dev = airoha_rtl8261_is_phy_addr(addr) ? eth->mdio_dev :
+		   (eth->switch_mdio_dev ? eth->switch_mdio_dev : eth->mdio_dev);
+	if (!mdio_dev)
 		return -ENODEV;
 
-	if (!ofnode_device_is_compatible(dev_ofnode(eth->mdio_dev),
+	if (!ofnode_device_is_compatible(dev_ofnode(mdio_dev),
 					 "airoha,arht-mdio"))
-		dm_mdio_write(eth->mdio_dev, 0, MDIO_DEVAD_NONE, MII_BMSR, 0x1);
-	return dm_mdio_read(eth->mdio_dev, addr, devad, reg);
+		dm_mdio_write(mdio_dev, 0, MDIO_DEVAD_NONE, MII_BMSR, 0x1);
+	return dm_mdio_read(mdio_dev, addr, devad, reg);
 }
 
 static int airoha_mdio_c45_write(struct airoha_eth *eth, int addr, int devad,
 				 int reg, u16 val)
 {
-	if (!eth->mdio_dev)
+	struct udevice *mdio_dev;
+
+	mdio_dev = airoha_rtl8261_is_phy_addr(addr) ? eth->mdio_dev :
+		   (eth->switch_mdio_dev ? eth->switch_mdio_dev : eth->mdio_dev);
+	if (!mdio_dev)
 		return -ENODEV;
 
-	return dm_mdio_write(eth->mdio_dev, addr, devad, reg, val);
+	return dm_mdio_write(mdio_dev, addr, devad, reg, val);
 }
 
 static int airoha_mdio_c22_write(struct airoha_eth *eth, int addr, int reg,
 				 u16 val)
 {
-	if (!eth->mdio_dev)
+	struct udevice *mdio_dev;
+
+	mdio_dev = airoha_rtl8261_is_phy_addr(addr) ? eth->mdio_dev :
+		   (eth->switch_mdio_dev ? eth->switch_mdio_dev : eth->mdio_dev);
+	if (!mdio_dev)
 		return -ENODEV;
 
-	return dm_mdio_write(eth->mdio_dev, addr, MDIO_DEVAD_NONE, reg, val);
+	return dm_mdio_write(mdio_dev, addr, MDIO_DEVAD_NONE, reg, val);
 }
 
 static int airoha_mdio_c22_read(struct airoha_eth *eth, int addr, int reg)
 {
-	if (!eth->mdio_dev)
+	struct udevice *mdio_dev;
+
+	mdio_dev = airoha_rtl8261_is_phy_addr(addr) ? eth->mdio_dev :
+		   (eth->switch_mdio_dev ? eth->switch_mdio_dev : eth->mdio_dev);
+	if (!mdio_dev)
 		return -ENODEV;
 
-	if (!ofnode_device_is_compatible(dev_ofnode(eth->mdio_dev),
+	if (!ofnode_device_is_compatible(dev_ofnode(mdio_dev),
 					 "airoha,arht-mdio"))
-		dm_mdio_write(eth->mdio_dev, 0, MDIO_DEVAD_NONE, MII_BMSR, 0x1);
-	return dm_mdio_read(eth->mdio_dev, addr, MDIO_DEVAD_NONE, reg);
+		dm_mdio_write(mdio_dev, 0, MDIO_DEVAD_NONE, MII_BMSR, 0x1);
+	return dm_mdio_read(mdio_dev, addr, MDIO_DEVAD_NONE, reg);
 }
 
 static int airoha_mdio_c22_mmd_read(struct airoha_eth *eth, int addr, int devad,
@@ -3322,12 +3344,19 @@ static void airoha_rtl8261_read_phy_props(struct airoha_eth *eth, ofnode mdio_no
 
 static ofnode airoha_ext_mdio_node(struct udevice *dev)
 {
-	struct airoha_eth_soc_data *data = (void *)dev_get_driver_data(dev);
-	ofnode mdio_node, switch_node;
+	ofnode mdio_node;
 
 	mdio_node = ofnode_by_compatible(ofnode_null(), "airoha,arht-mdio");
 	if (ofnode_valid(mdio_node))
 		return mdio_node;
+
+	return ofnode_null();
+}
+
+static ofnode airoha_switch_mdio_node(struct udevice *dev)
+{
+	struct airoha_eth_soc_data *data = (void *)dev_get_driver_data(dev);
+	ofnode switch_node;
 
 	switch_node =
 		ofnode_by_compatible(ofnode_null(), data->switch_compatible);
@@ -3347,7 +3376,11 @@ static int airoha_mdio_link_up(struct airoha_eth *eth, int addr)
 	};
 	int bmsr, i;
 
-	if (!eth->mdio_dev)
+	if (!airoha_rtl8261_is_phy_addr(addr) && !eth->switch_mdio_dev &&
+	    !eth->mdio_dev)
+		return 0;
+
+	if (airoha_rtl8261_is_phy_addr(addr) && !eth->mdio_dev)
 		return 0;
 
 	if (airoha_rtl8261_is_phy_addr(addr)) {
@@ -3455,21 +3488,27 @@ static int airoha_eth_gdm4_rxlock_workaround(struct airoha_eth *eth)
 static int airoha_forced_tx_fport(struct airoha_eth *eth)
 {
 	const char *port;
+	bool need_gdm4_bringup;
 
 	port = env_get("recovery_port");
 	if (!port || !*port || !strcmp(port, "auto"))
 		return 0;
 
 	if (!strcmp(port, "1") || !strcmp(port, "1g") ||
-	    !strcmp(port, "lan2") || !strcmp(port, "lan3"))
+	    !strcmp(port, "lan2") || !strcmp(port, "lan3")) {
+		eth->gdm4_link_up = false;
 		return 1;
+	}
 
-	if (!strcmp(port, "2") || !strcmp(port, "wan"))
+	if (!strcmp(port, "2") || !strcmp(port, "wan")) {
+		eth->gdm4_link_up = false;
 		return 2;
+	}
 
 	if (!strcmp(port, "4") || !strcmp(port, "10g") ||
 	    !strcmp(port, "lan1")) {
 		airoha_eth_gdm4_apply_runtime_phy_cfg(eth);
+		need_gdm4_bringup = eth->tx_fport != 4;
 
 		/*
 		 * Do not restart in-band autonegotiation before every packet.
@@ -3477,7 +3516,8 @@ static int airoha_forced_tx_fport(struct airoha_eth *eth)
 		 * can drop the very ARP/ICMP frames we are trying to emit.
 		 * Only run the heavy bring-up path when link is not already up.
 		 */
-		if (!eth->gdm4_link_up || !airoha_usxgmii_link_up(eth) ||
+		if (need_gdm4_bringup || !eth->gdm4_link_up ||
+		    !airoha_usxgmii_link_up(eth) ||
 		    !airoha_eth_gdm4_have_rx_signal(eth)) {
 			airoha_eth_gdm4_sync_rtl8261(eth);
 			airoha_eth_gdm4_diag(eth, "forced-10g-pre-an");
@@ -3507,8 +3547,10 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 	lan2_up = airoha_mdio_link_up(eth, 9);
 	lan3_up = airoha_mdio_link_up(eth, 10);
 
-	if (lan2_up || lan3_up)
+	if (lan2_up || lan3_up) {
+		eth->gdm4_link_up = false;
 		return 1;
+	}
 
 	if ((airoha_gdm4_pcs_link_up(eth) &&
 	     airoha_eth_gdm4_have_rx_signal(eth)) ||
@@ -4396,6 +4438,12 @@ static int airoha_switch_init(struct udevice *dev, struct airoha_eth *eth)
 				 FIELD_PREP(SWITCH_PHY_ST_ADDR,
 					    phy_poll_start));
 
+	mdio_node = airoha_switch_mdio_node(dev);
+	if (ofnode_valid(mdio_node) &&
+	    uclass_get_device_by_ofnode(UCLASS_MDIO, mdio_node,
+					&eth->switch_mdio_dev))
+		eth->switch_mdio_dev = NULL;
+
 	mdio_node = airoha_ext_mdio_node(dev);
 	if (ofnode_valid(mdio_node)) {
 		airoha_rtl8261_read_phy_props(eth, mdio_node);
@@ -4896,25 +4944,23 @@ static int airoha_eth_bind(struct udevice *dev)
 	struct udevice *mdio_dev;
 	int ret;
 
-	mdio_node = airoha_ext_mdio_node(dev);
-	if (!ofnode_valid(mdio_node))
-		return 0;
-
-	if (ofnode_device_is_compatible(mdio_node, "airoha,arht-mdio")) {
-		if (!CONFIG_IS_ENABLED(MDIO_AIROHA_ARHT))
-			return 0;
-
-		ret = device_bind_driver_to_node(dev, "airoha-arht-mdio",
-						 "mdio", mdio_node, &mdio_dev);
-	} else {
-		if (!CONFIG_IS_ENABLED(MDIO_MT7531_MMIO))
-			return 0;
-
+	mdio_node = airoha_switch_mdio_node(dev);
+	if (ofnode_valid(mdio_node) && CONFIG_IS_ENABLED(MDIO_MT7531_MMIO)) {
 		ret = device_bind_driver_to_node(dev, "mt7531-mdio-mmio",
-						 "mdio", mdio_node, &mdio_dev);
+						 "switch-mdio", mdio_node,
+						 &mdio_dev);
+		if (ret)
+			debug("Warning: failed to bind switch mdio controller\n");
 	}
-	if (ret)
-		debug("Warning: failed to bind mdio controller\n");
+
+	mdio_node = airoha_ext_mdio_node(dev);
+	if (ofnode_valid(mdio_node) && CONFIG_IS_ENABLED(MDIO_AIROHA_ARHT)) {
+		ret = device_bind_driver_to_node(dev, "airoha-arht-mdio",
+						 "ext-mdio", mdio_node,
+						 &mdio_dev);
+		if (ret)
+			debug("Warning: failed to bind external mdio controller\n");
+	}
 
 	return 0;
 }
