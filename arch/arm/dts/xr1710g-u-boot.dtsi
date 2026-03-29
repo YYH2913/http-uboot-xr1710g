@@ -11,25 +11,16 @@
 		device_type = "memory";
 		reg = <0x0 0x80000000 0x0 0x80000000>;
 	};
-};
 
-&snfi {
-	status = "okay";
-};
-
-&switch {
-	status = "okay";
-	pinctrl-names = "default";
-	pinctrl-0 = <&mdio_pins>;
 	/*
-	 * XR1710G exposes recovery Ethernet through external PHYs at MDIO
-	 * addresses 5 and 8, so the switch must poll that window instead of
-	 * the upstream default.
+	 * Stock XR1710G exposes the external RTL8261 PHYs on the FE MDIO
+	 * controller instead of the switch-local MT7531 MDIO block.
 	 */
-	airoha,phy-poll-start = <5>;
-	airoha,phy-poll-end = <10>;
+	mdio-bus {
+		compatible = "airoha,arht-mdio";
+		#address-cells = <1>;
+		#size-cells = <0>;
 
-	mdio {
 		phy5: ethernet-phy@5 {
 			compatible = "ethernet-phy-ieee802.3-c45";
 			reg = <5>;
@@ -54,4 +45,21 @@
 			realtek,pnswap-rx;
 		};
 	};
+};
+
+&snfi {
+	status = "okay";
+};
+
+&switch {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&mdio_pins>;
+	/*
+	 * XR1710G exposes recovery Ethernet through external PHYs at MDIO
+	 * addresses 5 and 8, so the switch must poll that window instead of
+	 * the upstream default.
+	 */
+	airoha,phy-poll-start = <5>;
+	airoha,phy-poll-end = <10>;
 };
