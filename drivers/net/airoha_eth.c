@@ -3536,7 +3536,9 @@ static int airoha_forced_tx_fport(struct airoha_eth *eth)
 static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 {
 	int lan2_up, lan3_up;
+	int wan_up;
 	int forced_fport;
+	bool gdm4_candidate;
 
 	forced_fport = airoha_forced_tx_fport(eth);
 	if (forced_fport > 0)
@@ -3546,15 +3548,41 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 
 	lan2_up = airoha_mdio_link_up(eth, 9);
 	lan3_up = airoha_mdio_link_up(eth, 10);
+	wan_up = airoha_mdio_link_up(eth, 8);
+	gdm4_candidate = (airoha_gdm4_pcs_link_up(eth) &&
+			  airoha_eth_gdm4_have_rx_signal(eth)) ||
+			 airoha_usxgmii_link_up(eth) ||
+			 airoha_mdio_link_up(eth, 5);
 
+	/*
+	 * In auto mode, always prefer the dedicated 1G recovery ports when they
+	 * have live link. Simultaneous dual-port service is not supported, and
+	 * this priority avoids getting stranded on a stale 10G selection when
+	 * the user moves the recovery cable back to 1G.
+	 */
 	if (lan2_up || lan3_up) {
 		eth->gdm4_link_up = false;
 		return 1;
 	}
 
-	if ((airoha_gdm4_pcs_link_up(eth) &&
-	     airoha_eth_gdm4_have_rx_signal(eth)) ||
-	    airoha_usxgmii_link_up(eth) || airoha_mdio_link_up(eth, 5)) {
+	if (eth->tx_fport == 4 && gdm4_candidate) {
+		if (!eth->gdm4_link_up || !airoha_usxgmii_link_up(eth) ||
+		    !airoha_eth_gdm4_have_rx_signal(eth)) {
+			airoha_eth_gdm4_sync_rtl8261(eth);
+			airoha_eth_gdm4_restart_an(eth);
+			airoha_eth_gdm4_link_up_config(eth);
+			airoha_eth_gdm4_diag(eth, "auto-gdm4-link");
+			eth->gdm4_link_up = true;
+		}
+		return 4;
+	}
+
+	if (eth->tx_fport == 2 && wan_up) {
+		eth->gdm4_link_up = false;
+		return 2;
+	}
+
+	if (gdm4_candidate) {
 		airoha_eth_gdm4_sync_rtl8261(eth);
 		airoha_eth_gdm4_restart_an(eth);
 		airoha_eth_gdm4_link_up_config(eth);
@@ -3565,7 +3593,7 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 
 	eth->gdm4_link_up = false;
 
-	if (airoha_mdio_link_up(eth, 8))
+	if (wan_up)
 		return 2;
 
 	if (eth->tx_fport == 2 || eth->tx_fport == 4)
@@ -4799,7 +4827,7 @@ static int airoha_eth_recv_qdma(struct airoha_eth *eth, struct airoha_qdma *qdma
 	 */
 	if (sport == 0x18)
 		eth->tx_fport = 4;
-	else if (sport == 2 || sport == 4)
+	else if (sport == 1 || sport == 2 || sport == 4)
 		eth->tx_fport = sport;
 	airoha_gdm4_update_cpu_path(eth);
 
