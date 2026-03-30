@@ -32,8 +32,10 @@
 #include <limits.h>
 #include <miiphy.h>
 #include <linux/mii.h>
+#include <mtd/ubi-user.h>
 #include <timer.h>
 #include <asm/io.h>
+#include "../../drivers/mtd/ubi/ubi.h"
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -115,6 +117,7 @@ struct recovery_target {
 	const char *ubi_part;
 	struct mtd_info *mtd;
 	loff_t ofs;
+	unsigned long long cur_size;
 	unsigned long long limit;
 };
 
@@ -390,6 +393,7 @@ static int recovery_try_ubi_target(enum upload_target tgt,
 {
 #if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
 	struct ubi_volume_desc *desc;
+	struct ubi_device *ubi;
 	const char *volume = env_get(recovery_target_env(tgt));
 	const char *part = recovery_ubi_part(tgt);
 
@@ -400,13 +404,28 @@ static int recovery_try_ubi_target(enum upload_target tgt,
 		return -ENODEV;
 
 	desc = ubi_open_volume_nm(0, volume, UBI_READWRITE);
-	if (IS_ERR_OR_NULL(desc))
-		return -ENODEV;
+	if (IS_ERR_OR_NULL(desc)) {
+		ubi = ubi_get_device(0);
+		if (!ubi)
+			return -ENODEV;
+
+		target->backend = RECOVERY_BACKEND_UBI;
+		target->name = volume;
+		target->ubi_part = part;
+		target->cur_size = 0;
+		target->limit = (unsigned long long)ubi->avail_pebs *
+			(unsigned long long)ubi->leb_size;
+		ubi_put_device(ubi);
+		return 0;
+	}
 
 	target->backend = RECOVERY_BACKEND_UBI;
 	target->name = volume;
 	target->ubi_part = part;
-	target->limit = (unsigned long long)desc->vol->reserved_pebs *
+	target->cur_size = (unsigned long long)desc->vol->reserved_pebs *
+			   (unsigned long long)desc->vol->usable_leb_size;
+	target->limit = (unsigned long long)(desc->vol->reserved_pebs +
+					     desc->vol->ubi->avail_pebs) *
 			(unsigned long long)desc->vol->usable_leb_size;
 
 	ubi_close_volume(desc);
@@ -447,6 +466,7 @@ static int recovery_resolve_target(enum upload_target tgt,
 				target->limit -= ofs;
 			if (size_cap && target->limit > size_cap)
 				target->limit = size_cap;
+			target->cur_size = target->limit;
 			return 0;
 		}
 	}
@@ -457,6 +477,7 @@ static int recovery_resolve_target(enum upload_target tgt,
 		target->name = name;
 		target->mtd = mtd;
 		target->limit = mtd->size;
+		target->cur_size = target->limit;
 		return 0;
 	}
 
@@ -494,6 +515,7 @@ static int recovery_resolve_target(enum upload_target tgt,
 		if (size_cap && target->limit > size_cap)
 			target->limit = size_cap;
 	}
+	target->cur_size = target->limit;
 
 	return 0;
 }
@@ -502,6 +524,91 @@ static void recovery_release_target(struct recovery_target *target)
 {
 	if (target->backend == RECOVERY_BACKEND_MTD && target->mtd)
 		put_mtd_device(target->mtd);
+}
+
+static int recovery_resize_ubi_target(struct recovery_target *target,
+				      size_t new_size)
+{
+#if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
+	struct ubi_volume_desc *desc;
+	struct ubi_volume *vol;
+	int needed_pebs;
+	int ret;
+
+	if (target->backend != RECOVERY_BACKEND_UBI)
+		return -EINVAL;
+
+	if (ubi_part((char *)target->ubi_part, NULL))
+		return -ENODEV;
+
+	desc = ubi_open_volume_nm(0, target->name, UBI_EXCLUSIVE);
+	if (IS_ERR_OR_NULL(desc))
+		return IS_ERR(desc) ? PTR_ERR(desc) : -ENODEV;
+
+	vol = desc->vol;
+	needed_pebs = DIV_ROUND_UP(new_size, vol->usable_leb_size);
+
+	mutex_lock(&vol->ubi->device_mutex);
+	ret = ubi_resize_volume(desc, needed_pebs);
+	mutex_unlock(&vol->ubi->device_mutex);
+
+	if (!ret) {
+		target->cur_size = (unsigned long long)needed_pebs *
+				   (unsigned long long)vol->usable_leb_size;
+		target->limit = (unsigned long long)(needed_pebs +
+						     vol->ubi->avail_pebs) *
+			(unsigned long long)vol->usable_leb_size;
+	}
+
+	ubi_close_volume(desc);
+	return ret;
+#else
+	return -ENODEV;
+#endif
+}
+
+static int recovery_create_ubi_target(struct recovery_target *target,
+				      size_t new_size)
+{
+#if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
+	struct ubi_mkvol_req req;
+	struct ubi_device *ubi;
+	int ret;
+
+	if (target->backend != RECOVERY_BACKEND_UBI)
+		return -EINVAL;
+
+	if (ubi_part((char *)target->ubi_part, NULL))
+		return -ENODEV;
+
+	ubi = ubi_get_device(0);
+	if (!ubi)
+		return -ENODEV;
+
+	memset(&req, 0, sizeof(req));
+	req.vol_id = UBI_VOL_NUM_AUTO;
+	req.alignment = 1;
+	req.bytes = new_size;
+	req.vol_type = UBI_STATIC_VOLUME;
+	req.name_len = strlen(target->name);
+	if (req.name_len > UBI_VOL_NAME_MAX) {
+		ubi_put_device(ubi);
+		return -ENAMETOOLONG;
+	}
+	memcpy(req.name, target->name, req.name_len);
+	req.name[req.name_len] = '\0';
+
+	mutex_lock(&ubi->device_mutex);
+	ret = ubi_create_volume(ubi, &req);
+	mutex_unlock(&ubi->device_mutex);
+	ubi_put_device(ubi);
+	if (ret)
+		return ret;
+
+	return recovery_try_ubi_target(current_target, target);
+#else
+	return -ENODEV;
+#endif
 }
 
 /* Determine maximum payload size based on selected target and DTS-defined MTD
@@ -800,6 +907,28 @@ static int flash_image(void)
 	}
 
 	if (target.backend == RECOVERY_BACKEND_UBI) {
+		if (!target.cur_size) {
+			printf("Creating missing UBI volume '%s' for %u bytes...\n",
+			       target.name, recv_off);
+			ret = recovery_create_ubi_target(&target, recv_off);
+			if (ret) {
+				printf("ubi_create_volume failed for '%s': %d\n",
+				       target.name, ret);
+				prog_phase = -1;
+				return ret;
+			}
+		} else if (recv_off > target.cur_size) {
+			printf("Resizing UBI volume '%s' from %llu to fit %u bytes...\n",
+			       target.name, target.cur_size, recv_off);
+			ret = recovery_resize_ubi_target(&target, recv_off);
+			if (ret) {
+				printf("ubi_resize_volume failed for '%s': %d\n",
+				       target.name, ret);
+				prog_phase = -1;
+				return ret;
+			}
+		}
+
 		printf("Writing %u bytes to UBI volume '%s' on '%s'...\n",
 		       recv_off, target.name, target.ubi_part);
 		prog_phase = 2;
