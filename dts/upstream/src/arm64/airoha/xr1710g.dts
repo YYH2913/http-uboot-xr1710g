@@ -189,8 +189,8 @@
 						volname = "fit";
 					};
 
-					ubi_factory: ubi-volume-factory {
-						volname = "factory";
+					ubi_caldata: ubi-volume-caldata {
+						volname = "caldata";
 					};
 				};
 			};
@@ -204,7 +204,7 @@
 		};
 	};
 
-&ubi_factory {
+&ubi_caldata {
 	nvmem-layout {
 		compatible = "fixed-layout";
 		#address-cells = <1>;
@@ -212,16 +212,6 @@
 
 		eeprom: eeprom@0 {
 			reg = <0x0 0x1e00>;
-		};
-
-		wan_mac: macaddr@5000 {
-			reg = <0x5000 0x6>;
-		};
-
-		lan_mac: macaddr@6000 {
-			compatible = "mac-base";
-			reg = <0x6000 0x6>;
-			#nvmem-cell-cells = <1>;
 		};
 	};
 };
