@@ -39,6 +39,8 @@
 
 DECLARE_GLOBAL_DATA_PTR;
 
+int xr1710g_sync_caldata(void);
+
 /*
  * Upload buffer
  * Use env 'recovery_addr' if set, otherwise fall back to U-Boot 'loadaddr'.
@@ -955,6 +957,8 @@ static int flash_image(void)
 		prog_write_done = recv_off;
 		prog_done = recv_off;
 		prog_phase = 3;
+		if (current_target == TARGET_FIRMWARE)
+			xr1710g_sync_caldata();
 		printf("Flashing complete.\n");
 		return 0;
 	}
@@ -1051,6 +1055,8 @@ static int flash_image(void)
 
 	recovery_release_target(&target);
 	prog_phase = 3;
+	if (current_target == TARGET_FIRMWARE)
+		xr1710g_sync_caldata();
 	printf("Flashing complete.\n");
 	return 0;
 }
