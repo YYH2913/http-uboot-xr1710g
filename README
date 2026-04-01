@@ -1,3 +1,11 @@
+XR1710G Notes:
+==============
+
+Project-specific usage and flashing notes for the XR1710G port live in
+README.md in this directory.
+
+The remainder of this file is the upstream U-Boot README.
+
  # SPDX-License-Identifier: GPL-2.0+
 #
 # (C) Copyright 2000 - 2013
