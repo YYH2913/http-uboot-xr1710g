@@ -20,13 +20,19 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <console.h>
+#include <asm/gpio.h>
 #include <asm/global_data.h>
+#include <dt-bindings/gpio/gpio.h>
 
 #include <lwip/netif.h>
 #include <lwip/pbuf.h>
+#include <lwip/ip.h>
 #include <lwip/timeouts.h>
+#include <lwip/udp.h>
 #include <lwip/apps/httpd.h>
 #include <lwip/apps/fs.h>
+#include <lwip/prot/dhcp.h>
+#include <lwip/prot/iana.h>
 #include <version.h>
 #include <timestamp.h>
 #include <limits.h>
@@ -51,8 +57,23 @@ int xr1710g_sync_caldata(void);
 
 /* Delay before reboot after flashing completes, to let browser finish reads */
 #define REBOOT_DELAY_MS        3000
+#define RECOVERY_STATIC_IPADDR           "192.168.255.1"
+#define RECOVERY_STATIC_NETMASK          "255.255.255.0"
+#define RECOVERY_STATIC_GATEWAY          "0.0.0.0"
+#define RECOVERY_DHCP_CLIENT_IPADDR      "192.168.255.2"
+#define RECOVERY_DHCP_BROADCAST_IPADDR   "192.168.255.255"
+#define RECOVERY_DHCP_LEASE_SECS         86400U
+#define RECOVERY_DHCP_MAX_MSG_LEN        1500
 #define RECOVERY_LED_PORTS     2
 #define RECOVERY_LED_POLL_MS   100
+#define RECOVERY_STATUS_LED_MAX           8
+#define RECOVERY_STATUS_PWM_PERIOD_MS     20
+#define RECOVERY_STATUS_BREATHE_PERIOD_MS 1800
+#define RECOVERY_STATUS_BREATHE_HALF_MS   (RECOVERY_STATUS_BREATHE_PERIOD_MS / 2)
+#define RECOVERY_STATUS_SWEEP_STEP_MS     700
+#define RECOVERY_STATUS_OVERLAP_FP        (2 * 256)
+#define RECOVERY_STATUS_BRIGHTNESS_FP     256
+#define RECOVERY_STATUS_BREATHE_MIN_FP    64
 
 #define RECOVERY_GPIO_SYSCTL_BASE      0x1fbf0200
 #define RECOVERY_CHIP_SCU_BASE         0x1fa20000
@@ -60,6 +81,7 @@ int xr1710g_sync_caldata(void);
 #define RECOVERY_REG_GPIO_OE           0x0014
 #define RECOVERY_REG_GPIO_CTRL         0x0000
 #define RECOVERY_REG_GPIO_CTRL1        0x0020
+#define RECOVERY_REG_GPIO_FLASH_MODE_CFG 0x0034
 #define RECOVERY_REG_GPIO_CTRL2        0x0060
 #define RECOVERY_REG_GPIO_CTRL3        0x0064
 #define RECOVERY_REG_GPIO_DATA1        0x0070
@@ -102,6 +124,13 @@ static void reboot_delay_cb(void *arg)
     reboot_request = 1;
 }
 
+static void recovery_prepare_static_network(void)
+{
+	env_set("ipaddr", RECOVERY_STATIC_IPADDR);
+	env_set("netmask", RECOVERY_STATIC_NETMASK);
+	env_set("gatewayip", RECOVERY_STATIC_GATEWAY);
+}
+
 enum upload_target {
 	TARGET_FIRMWARE = 0,
 	TARGET_UBOOT,
@@ -128,6 +157,31 @@ struct recovery_led_ctrl {
 	ulong last_poll;
 };
 
+struct recovery_gpio_pin {
+	struct gpio_desc desc;
+	ofnode node;
+	u8 gpio;
+	bool active_low;
+	bool valid;
+};
+
+struct recovery_status_led_ctrl {
+	struct recovery_gpio_pin leds[RECOVERY_STATUS_LED_MAX];
+	int led_count;
+	ulong start_ms;
+};
+
+struct recovery_dhcp_server {
+	struct udp_pcb *pcb;
+	struct netif *netif;
+	ip4_addr_t server_ip;
+	ip4_addr_t client_ip;
+	ip4_addr_t netmask;
+	ip4_addr_t router;
+	ip4_addr_t broadcast;
+	ip4_addr_t dns;
+};
+
 static const int recovery_led_phy_addrs[RECOVERY_LED_PORTS] = { 9, 10 };
 static const u8 recovery_green_led_gpios[RECOVERY_LED_PORTS] = { 43, 44 };
 static const u8 recovery_yellow_led_gpios[RECOVERY_LED_PORTS] = { 33, 34 };
@@ -135,6 +189,29 @@ static const u8 recovery_yellow_led_gpios[RECOVERY_LED_PORTS] = { 33, 34 };
 static void recovery_led_ctrl_free(struct recovery_led_ctrl *ctrl)
 {
 	memset(ctrl, 0, sizeof(*ctrl));
+}
+
+static bool recovery_gpio_flash_mode_bit(u8 gpio, uintptr_t *reg, u32 *mask)
+{
+	if (gpio <= 15) {
+		*reg = RECOVERY_GPIO_SYSCTL_BASE + RECOVERY_REG_GPIO_FLASH_MODE_CFG;
+		*mask = BIT(gpio);
+		return true;
+	}
+
+	if (gpio >= 16 && gpio <= 31) {
+		*reg = RECOVERY_GPIO_SYSCTL_BASE + RECOVERY_REG_GPIO_FLASH_MODE_CFG_EXT;
+		*mask = BIT(gpio - 16);
+		return true;
+	}
+
+	if (gpio >= 36 && gpio <= 51) {
+		*reg = RECOVERY_GPIO_SYSCTL_BASE + RECOVERY_REG_GPIO_FLASH_MODE_CFG_EXT;
+		*mask = BIT(gpio - 20);
+		return true;
+	}
+
+	return false;
 }
 
 static void recovery_clrsetbits_le32(uintptr_t addr, u32 clear, u32 set)
@@ -179,17 +256,663 @@ static void recovery_gpio_direction_output(u8 gpio)
 	recovery_clrsetbits_le32(recovery_gpio_dir_reg(gpio), 0, dir_bit);
 }
 
-static void recovery_gpio_set_active_low(u8 gpio, int active)
+static void recovery_gpio_prepare_output(u8 gpio)
+{
+	uintptr_t reg;
+	u32 mask;
+
+	if (recovery_gpio_flash_mode_bit(gpio, &reg, &mask))
+		recovery_clrsetbits_le32(reg, mask, 0);
+
+	recovery_gpio_direction_output(gpio);
+}
+
+static void recovery_gpio_set_value(u8 gpio, bool active_low, int active)
 {
 	u32 bit = BIT(gpio % 32);
 	uintptr_t reg = recovery_gpio_data_reg(gpio);
+	u32 set = active_low ? (active ? 0 : bit) : (active ? bit : 0);
 
-	recovery_clrsetbits_le32(reg, bit, active ? 0 : bit);
+	recovery_clrsetbits_le32(reg, bit, set);
 }
 
 static void recovery_led_set_pin(u8 gpio, int on)
 {
-	recovery_gpio_set_active_low(gpio, on);
+	recovery_gpio_set_value(gpio, true, on);
+}
+
+static void recovery_status_led_set(const struct recovery_gpio_pin *pin, int on)
+{
+	if (!pin->valid)
+		return;
+
+	recovery_gpio_set_value(pin->gpio, pin->active_low, on);
+}
+
+static void recovery_gpio_pin_release(struct recovery_gpio_pin *pin)
+{
+	if (!pin->valid)
+		return;
+
+	memset(pin, 0, sizeof(*pin));
+}
+
+static ofnode recovery_led_alias_node(const char *alias)
+{
+	ofnode aliases;
+	const char *path;
+
+	aliases = ofnode_path("/aliases");
+	if (!ofnode_valid(aliases))
+		return ofnode_null();
+
+	path = ofnode_read_string(aliases, alias);
+	if (!path)
+		return ofnode_null();
+
+	return ofnode_path(path);
+}
+
+static int recovery_led_node_to_gpio(ofnode node, struct recovery_gpio_pin *pin)
+{
+	struct ofnode_phandle_args args;
+	int ret;
+
+	memset(pin, 0, sizeof(*pin));
+
+	if (!ofnode_valid(node))
+		return -ENOENT;
+
+	ret = ofnode_parse_phandle_with_args(node, "gpios", "#gpio-cells", 0, 0,
+					     &args);
+	if (ret)
+		return ret;
+
+	if (args.args_count < 1)
+		return -EINVAL;
+
+	pin->gpio = args.args[0];
+	pin->active_low = args.args_count > 1 &&
+			  (args.args[1] & GPIO_ACTIVE_LOW);
+	pin->node = node;
+	pin->valid = true;
+
+	return 0;
+}
+
+static void recovery_status_led_add(struct recovery_status_led_ctrl *ctrl,
+				    const struct recovery_gpio_pin *pin)
+{
+	int i;
+
+	if (!pin->valid)
+		return;
+
+	for (i = 0; i < ctrl->led_count; i++) {
+		if (ctrl->leds[i].gpio == pin->gpio)
+			return;
+	}
+
+	if (ctrl->led_count >= ARRAY_SIZE(ctrl->leds))
+		return;
+
+	ctrl->leds[ctrl->led_count++] = *pin;
+}
+
+static void recovery_status_led_collect_alias(struct recovery_status_led_ctrl *ctrl,
+					      const char *alias)
+{
+	struct recovery_gpio_pin pin;
+
+	if (!recovery_led_node_to_gpio(recovery_led_alias_node(alias), &pin))
+		recovery_status_led_add(ctrl, &pin);
+}
+
+static int recovery_status_led_request(struct recovery_gpio_pin *pin)
+{
+	recovery_gpio_prepare_output(pin->gpio);
+	recovery_gpio_set_value(pin->gpio, pin->active_low, 0);
+
+	return 0;
+}
+
+static void recovery_status_led_release(struct recovery_status_led_ctrl *ctrl)
+{
+	int i;
+
+	for (i = 0; i < ctrl->led_count; i++)
+		recovery_gpio_pin_release(&ctrl->leds[i]);
+
+	memset(ctrl, 0, sizeof(*ctrl));
+}
+
+static int recovery_status_led_init(struct recovery_status_led_ctrl *ctrl)
+{
+	static const char *const status_aliases[] = {
+		"led-boot",
+		"led-running",
+		"led-failsafe",
+		"led-upgrade",
+	};
+	ofnode leds, node;
+	int i, keep = 0;
+
+	memset(ctrl, 0, sizeof(*ctrl));
+
+	leds = ofnode_path("/leds");
+	if (ofnode_valid(leds)) {
+		ofnode_for_each_subnode(node, leds) {
+			const char *function;
+			struct recovery_gpio_pin pin;
+
+			function = ofnode_read_string(node, "function");
+			if (!function || strcmp(function, "status"))
+				continue;
+
+			if (!recovery_led_node_to_gpio(node, &pin))
+				recovery_status_led_add(ctrl, &pin);
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(status_aliases); i++)
+		recovery_status_led_collect_alias(ctrl, status_aliases[i]);
+
+	if (!ctrl->led_count)
+		return -ENOENT;
+
+	for (i = 0; i < ctrl->led_count; i++) {
+		int ret;
+
+		ret = recovery_status_led_request(&ctrl->leds[i]);
+		if (ret) {
+			printf("Recovery status LED gpio%u request failed: %d\n",
+			       ctrl->leds[i].gpio, ret);
+			recovery_gpio_pin_release(&ctrl->leds[i]);
+			continue;
+		}
+
+		if (keep != i) {
+			ctrl->leds[keep] = ctrl->leds[i];
+			memset(&ctrl->leds[i], 0, sizeof(ctrl->leds[i]));
+		}
+		keep++;
+	}
+
+	ctrl->led_count = keep;
+
+	if (!ctrl->led_count) {
+		recovery_status_led_release(ctrl);
+		return -ENODEV;
+	}
+
+	ctrl->start_ms = get_timer(0);
+
+	printf("Recovery status LEDs:");
+	for (i = 0; i < ctrl->led_count; i++)
+		printf(" gpio%u%s", ctrl->leds[i].gpio,
+		       ctrl->leds[i].active_low ? "(L)" : "");
+	printf("\n");
+
+	return 0;
+}
+
+static u32 recovery_status_led_breath_fp(ulong elapsed)
+{
+	ulong phase, ramp;
+	u32 delta;
+
+	phase = elapsed % RECOVERY_STATUS_BREATHE_PERIOD_MS;
+	ramp = phase < RECOVERY_STATUS_BREATHE_HALF_MS ?
+	       phase : RECOVERY_STATUS_BREATHE_PERIOD_MS - phase;
+	delta = RECOVERY_STATUS_BRIGHTNESS_FP - RECOVERY_STATUS_BREATHE_MIN_FP;
+
+	return RECOVERY_STATUS_BREATHE_MIN_FP +
+	       (delta * ramp * ramp +
+		(RECOVERY_STATUS_BREATHE_HALF_MS *
+		 RECOVERY_STATUS_BREATHE_HALF_MS) / 2) /
+	       (RECOVERY_STATUS_BREATHE_HALF_MS *
+		RECOVERY_STATUS_BREATHE_HALF_MS);
+}
+
+static ulong recovery_status_led_position_fp(struct recovery_status_led_ctrl *ctrl,
+					     ulong elapsed)
+{
+	ulong range_fp, phase;
+	int span;
+
+	if (ctrl->led_count <= 1)
+		return 0;
+
+	span = ctrl->led_count - 1;
+	range_fp = span * RECOVERY_STATUS_BRIGHTNESS_FP;
+	phase = elapsed % (2 * span * RECOVERY_STATUS_SWEEP_STEP_MS);
+
+	if (phase <= span * RECOVERY_STATUS_SWEEP_STEP_MS)
+		return phase * RECOVERY_STATUS_BRIGHTNESS_FP /
+		       RECOVERY_STATUS_SWEEP_STEP_MS;
+
+	phase -= span * RECOVERY_STATUS_SWEEP_STEP_MS;
+
+	return range_fp - (phase * RECOVERY_STATUS_BRIGHTNESS_FP /
+			   RECOVERY_STATUS_SWEEP_STEP_MS);
+}
+
+static int recovery_status_led_duty_ms(struct recovery_status_led_ctrl *ctrl,
+				       int idx, ulong elapsed)
+{
+	ulong center_fp, pwm_phase;
+	u32 breath_fp, weight_fp, dist_fp;
+	ulong led_pos_fp;
+
+	center_fp = recovery_status_led_position_fp(ctrl, elapsed);
+	led_pos_fp = idx * RECOVERY_STATUS_BRIGHTNESS_FP;
+	dist_fp = center_fp > led_pos_fp ? center_fp - led_pos_fp :
+					  led_pos_fp - center_fp;
+	if (dist_fp >= RECOVERY_STATUS_OVERLAP_FP)
+		return 0;
+
+	weight_fp = (RECOVERY_STATUS_OVERLAP_FP - dist_fp) *
+		    RECOVERY_STATUS_BRIGHTNESS_FP / RECOVERY_STATUS_OVERLAP_FP;
+	weight_fp = weight_fp * weight_fp / RECOVERY_STATUS_BRIGHTNESS_FP;
+	breath_fp = recovery_status_led_breath_fp(elapsed);
+	pwm_phase = weight_fp * breath_fp;
+	pwm_phase = (pwm_phase + RECOVERY_STATUS_BRIGHTNESS_FP / 2) /
+		    RECOVERY_STATUS_BRIGHTNESS_FP;
+
+	return (pwm_phase * RECOVERY_STATUS_PWM_PERIOD_MS +
+		RECOVERY_STATUS_BRIGHTNESS_FP / 2) /
+	       RECOVERY_STATUS_BRIGHTNESS_FP;
+}
+
+static void recovery_status_led_poll(struct recovery_status_led_ctrl *ctrl)
+{
+	ulong elapsed, now, pwm_phase;
+	int duty_ms;
+	int i;
+
+	if (!ctrl->led_count)
+		return;
+
+	now = get_timer(0);
+	elapsed = now - ctrl->start_ms;
+	pwm_phase = elapsed % RECOVERY_STATUS_PWM_PERIOD_MS;
+
+	for (i = 0; i < ctrl->led_count; i++) {
+		duty_ms = recovery_status_led_duty_ms(ctrl, i, elapsed);
+		recovery_status_led_set(&ctrl->leds[i],
+					duty_ms && pwm_phase < duty_ms);
+	}
+}
+
+static void recovery_status_led_stop(struct recovery_status_led_ctrl *ctrl)
+{
+	int i;
+
+	if (!ctrl->led_count)
+		return;
+
+	for (i = 0; i < ctrl->led_count; i++)
+		recovery_status_led_set(&ctrl->leds[i], 0);
+}
+
+enum recovery_dhcp_request_verdict {
+	RECOVERY_DHCP_REQUEST_ACK = 0,
+	RECOVERY_DHCP_REQUEST_NAK,
+	RECOVERY_DHCP_REQUEST_IGNORE,
+};
+
+static int recovery_dhcp_get_option(const u8 *pkt, int pkt_len, u8 code,
+				    const u8 **value, u8 *value_len)
+{
+	int off = DHCP_OPTIONS_OFS;
+
+	while (off < pkt_len) {
+		u8 opt, opt_len;
+
+		opt = pkt[off++];
+		if (opt == DHCP_OPTION_PAD)
+			continue;
+		if (opt == DHCP_OPTION_END)
+			return -ENOENT;
+		if (off >= pkt_len)
+			break;
+
+		opt_len = pkt[off++];
+		if (off + opt_len > pkt_len)
+			break;
+
+		if (opt == code) {
+			if (value)
+				*value = pkt + off;
+			if (value_len)
+				*value_len = opt_len;
+			return 0;
+		}
+
+		off += opt_len;
+	}
+
+	return -EINVAL;
+}
+
+static int recovery_dhcp_get_u8_option(const u8 *pkt, int pkt_len, u8 code,
+				       u8 *value)
+{
+	const u8 *opt;
+	u8 opt_len;
+	int ret;
+
+	ret = recovery_dhcp_get_option(pkt, pkt_len, code, &opt, &opt_len);
+	if (ret)
+		return ret;
+	if (opt_len != sizeof(*value))
+		return -EINVAL;
+
+	*value = opt[0];
+	return 0;
+}
+
+static int recovery_dhcp_get_ip4_option(const u8 *pkt, int pkt_len, u8 code,
+					ip4_addr_t *addr)
+{
+	const u8 *opt;
+	u8 opt_len;
+	int ret;
+
+	ret = recovery_dhcp_get_option(pkt, pkt_len, code, &opt, &opt_len);
+	if (ret)
+		return ret;
+	if (opt_len != sizeof(addr->addr))
+		return -EINVAL;
+
+	memcpy(&addr->addr, opt, sizeof(addr->addr));
+	return 0;
+}
+
+static int recovery_dhcp_put_option_head(u8 *options, int off, u8 code, u8 len)
+{
+	if (off < 0 || off + 2 + len > DHCP_OPTIONS_LEN)
+		return -ENOSPC;
+
+	options[off++] = code;
+	options[off++] = len;
+
+	return off;
+}
+
+static int recovery_dhcp_put_u8_option(u8 *options, int off, u8 code, u8 value)
+{
+	off = recovery_dhcp_put_option_head(options, off, code, sizeof(value));
+	if (off < 0)
+		return off;
+
+	options[off++] = value;
+	return off;
+}
+
+static int recovery_dhcp_put_u32_option(u8 *options, int off, u8 code, u32 value)
+{
+	u32 be_value = lwip_htonl(value);
+
+	off = recovery_dhcp_put_option_head(options, off, code,
+					    sizeof(be_value));
+	if (off < 0)
+		return off;
+
+	memcpy(options + off, &be_value, sizeof(be_value));
+	return off + sizeof(be_value);
+}
+
+static int recovery_dhcp_put_ip4_option(u8 *options, int off, u8 code,
+					const ip4_addr_t *addr)
+{
+	off = recovery_dhcp_put_option_head(options, off, code,
+					    sizeof(addr->addr));
+	if (off < 0)
+		return off;
+
+	memcpy(options + off, &addr->addr, sizeof(addr->addr));
+	return off + sizeof(addr->addr);
+}
+
+static void recovery_dhcp_finalize_options(struct pbuf *p, struct dhcp_msg *msg,
+					   int opt_len)
+{
+	msg->options[opt_len++] = DHCP_OPTION_END;
+
+	while (((opt_len < DHCP_MIN_OPTIONS_LEN) || (opt_len & 3)) &&
+	       opt_len < DHCP_OPTIONS_LEN)
+		msg->options[opt_len++] = DHCP_OPTION_PAD;
+
+	pbuf_realloc(p, sizeof(*msg) - DHCP_OPTIONS_LEN + opt_len);
+}
+
+static enum recovery_dhcp_request_verdict
+recovery_dhcp_classify_request(struct recovery_dhcp_server *srv,
+			       const struct dhcp_msg *req,
+			       const u8 *pkt, int pkt_len)
+{
+	ip4_addr_t option_ip, ciaddr;
+	bool has_server_id, has_requested_ip;
+
+	has_server_id = !recovery_dhcp_get_ip4_option(pkt, pkt_len,
+						      DHCP_OPTION_SERVER_ID,
+						      &option_ip);
+	if (has_server_id) {
+		if (!ip4_addr_eq(&option_ip, &srv->server_ip))
+			return RECOVERY_DHCP_REQUEST_IGNORE;
+	}
+
+	has_requested_ip = !recovery_dhcp_get_ip4_option(pkt, pkt_len,
+							 DHCP_OPTION_REQUESTED_IP,
+							 &option_ip);
+	if (has_requested_ip) {
+		return ip4_addr_eq(&option_ip, &srv->client_ip) ?
+			RECOVERY_DHCP_REQUEST_ACK :
+			RECOVERY_DHCP_REQUEST_NAK;
+	}
+
+	ciaddr.addr = req->ciaddr.addr;
+	if (!ip4_addr_isany(&ciaddr)) {
+		return ip4_addr_eq(&ciaddr, &srv->client_ip) ?
+			RECOVERY_DHCP_REQUEST_ACK :
+			RECOVERY_DHCP_REQUEST_NAK;
+	}
+
+	return RECOVERY_DHCP_REQUEST_ACK;
+}
+
+static int recovery_dhcp_send_reply(struct recovery_dhcp_server *srv,
+				    const struct dhcp_msg *req,
+				    u8 message_type)
+{
+	struct pbuf *p;
+	struct dhcp_msg *reply;
+	ip_addr_t src_addr;
+	ip_addr_t reply_addr;
+	int opt_len;
+	err_t err;
+
+	p = pbuf_alloc(PBUF_TRANSPORT, sizeof(*reply), PBUF_RAM);
+	if (!p)
+		return -ENOMEM;
+
+	reply = p->payload;
+	memset(reply, 0, sizeof(*reply));
+
+	reply->op = DHCP_BOOTREPLY;
+	reply->htype = req->htype;
+	reply->hlen = req->hlen;
+	reply->hops = req->hops;
+	reply->xid = req->xid;
+	reply->secs = req->secs;
+	reply->flags = req->flags | lwip_htons(0x8000);
+	if (message_type != DHCP_NAK)
+		reply->yiaddr.addr = srv->client_ip.addr;
+	reply->siaddr.addr = 0;
+	reply->giaddr = req->giaddr;
+	memcpy(reply->chaddr, req->chaddr, DHCP_CHADDR_LEN);
+	reply->cookie = PP_HTONL(DHCP_MAGIC_COOKIE);
+
+	opt_len = 0;
+	opt_len = recovery_dhcp_put_u8_option(reply->options, opt_len,
+					      DHCP_OPTION_MESSAGE_TYPE,
+					      message_type);
+	opt_len = recovery_dhcp_put_ip4_option(reply->options, opt_len,
+					       DHCP_OPTION_SERVER_ID,
+					       &srv->server_ip);
+	if (message_type != DHCP_NAK) {
+		opt_len = recovery_dhcp_put_u32_option(reply->options, opt_len,
+						       DHCP_OPTION_LEASE_TIME,
+						       RECOVERY_DHCP_LEASE_SECS);
+		opt_len = recovery_dhcp_put_ip4_option(reply->options, opt_len,
+						       DHCP_OPTION_SUBNET_MASK,
+						       &srv->netmask);
+	}
+	if (opt_len < 0) {
+		pbuf_free(p);
+		return opt_len;
+	}
+
+	recovery_dhcp_finalize_options(p, reply, opt_len);
+
+	reply_addr = *IP_ADDR_BROADCAST;
+
+	ip_addr_copy_from_ip4(src_addr, srv->server_ip);
+	err = udp_sendto_if_src(srv->pcb, p, &reply_addr,
+				LWIP_IANA_PORT_DHCP_CLIENT, srv->netif,
+				&src_addr);
+	pbuf_free(p);
+
+	return err == ERR_OK ? 0 : -EIO;
+}
+
+static void recovery_dhcp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
+			       const ip_addr_t *addr, u16_t port)
+{
+	struct recovery_dhcp_server *srv = arg;
+	const struct dhcp_msg *req;
+	u8 pkt[RECOVERY_DHCP_MAX_MSG_LEN];
+	u8 message_type;
+	int copy_len, pkt_len;
+
+	(void)pcb;
+	(void)addr;
+
+	if (!p)
+		return;
+
+	if (port != LWIP_IANA_PORT_DHCP_CLIENT)
+		goto out;
+
+	copy_len = p->tot_len;
+	if (copy_len > sizeof(pkt))
+		copy_len = sizeof(pkt);
+
+	pkt_len = pbuf_copy_partial(p, pkt, copy_len, 0);
+	if (pkt_len < DHCP_OPTIONS_OFS)
+		goto out;
+
+	req = (const struct dhcp_msg *)pkt;
+	if (req->op != DHCP_BOOTREQUEST ||
+	    req->htype != LWIP_IANA_HWTYPE_ETHERNET ||
+	    req->hlen != ARP_HLEN ||
+	    req->cookie != PP_HTONL(DHCP_MAGIC_COOKIE))
+		goto out;
+
+	if (recovery_dhcp_get_u8_option(pkt, pkt_len, DHCP_OPTION_MESSAGE_TYPE,
+					&message_type))
+		goto out;
+
+	switch (message_type) {
+	case DHCP_DISCOVER:
+		recovery_dhcp_send_reply(srv, req, DHCP_OFFER);
+		break;
+	case DHCP_REQUEST:
+		switch (recovery_dhcp_classify_request(srv, req, pkt, pkt_len)) {
+		case RECOVERY_DHCP_REQUEST_ACK:
+			recovery_dhcp_send_reply(srv, req, DHCP_ACK);
+			break;
+		case RECOVERY_DHCP_REQUEST_NAK:
+			recovery_dhcp_send_reply(srv, req, DHCP_NAK);
+			break;
+		default:
+			break;
+		}
+		break;
+	default:
+		break;
+	}
+
+out:
+	pbuf_free(p);
+}
+
+static int recovery_dhcp_server_init(struct recovery_dhcp_server *srv,
+				     struct netif *netif)
+{
+	char server_ip[IP4ADDR_STRLEN_MAX];
+	char client_ip[IP4ADDR_STRLEN_MAX];
+	char netmask[IP4ADDR_STRLEN_MAX];
+	char router[IP4ADDR_STRLEN_MAX];
+	char broadcast[IP4ADDR_STRLEN_MAX];
+	err_t err;
+
+	memset(srv, 0, sizeof(*srv));
+
+	srv->netif = netif;
+	ip4_addr_copy(srv->server_ip, *netif_ip4_addr(netif));
+	ip4_addr_copy(srv->netmask, *netif_ip4_netmask(netif));
+	ip4_addr_copy(srv->router, *netif_ip4_gw(netif));
+	ip4_addr_copy(srv->dns, *netif_ip4_addr(netif));
+
+	if (ip4_addr_isany(&srv->router))
+		ip4_addr_copy(srv->router, srv->server_ip);
+
+	if (!ip4addr_aton(RECOVERY_DHCP_CLIENT_IPADDR, &srv->client_ip))
+		return -EINVAL;
+
+	if (ip4_addr_isany(&srv->netmask)) {
+		if (!ip4addr_aton(RECOVERY_DHCP_BROADCAST_IPADDR, &srv->broadcast))
+			return -EINVAL;
+	} else {
+		srv->broadcast.addr = (srv->server_ip.addr & srv->netmask.addr) |
+				      ~srv->netmask.addr;
+	}
+
+	srv->pcb = udp_new();
+	if (!srv->pcb)
+		return -ENOMEM;
+
+	ip_set_option(srv->pcb, SOF_BROADCAST);
+
+	err = udp_bind(srv->pcb, IP4_ADDR_ANY, LWIP_IANA_PORT_DHCP_SERVER);
+	if (err != ERR_OK) {
+		udp_remove(srv->pcb);
+		srv->pcb = NULL;
+		return -EIO;
+	}
+
+	udp_bind_netif(srv->pcb, netif);
+	udp_recv(srv->pcb, recovery_dhcp_recv, srv);
+
+	printf("DHCP recovery server: %s/67 -> offer %s mask %s gw %s bcast %s\n",
+	       ip4addr_ntoa_r(&srv->server_ip, server_ip, sizeof(server_ip)),
+	       ip4addr_ntoa_r(&srv->client_ip, client_ip, sizeof(client_ip)),
+	       ip4addr_ntoa_r(&srv->netmask, netmask, sizeof(netmask)),
+	       ip4addr_ntoa_r(&srv->router, router, sizeof(router)),
+	       ip4addr_ntoa_r(&srv->broadcast, broadcast,
+			      sizeof(broadcast)));
+
+	return 0;
+}
+
+static void recovery_dhcp_server_stop(struct recovery_dhcp_server *srv)
+{
+	if (srv->pcb)
+		udp_remove(srv->pcb);
+
+	memset(srv, 0, sizeof(*srv));
 }
 
 static int recovery_led_init(struct recovery_led_ctrl *ctrl)
@@ -199,11 +922,6 @@ static int recovery_led_init(struct recovery_led_ctrl *ctrl)
 
 	memset(ctrl, 0, sizeof(*ctrl));
 
-	/* Ensure LED1 pins are switched back to plain GPIO mode. */
-	recovery_clrsetbits_le32(RECOVERY_CHIP_SCU_BASE + RECOVERY_REG_GPIO_FLASH_MODE_CFG_EXT,
-				 0, RECOVERY_GPIO43_FLASH_MODE_CFG |
-				    RECOVERY_GPIO44_FLASH_MODE_CFG);
-
 	/* Make sure PHY LED mux is disabled so software can own the lines. */
 	recovery_clrsetbits_le32(RECOVERY_CHIP_SCU_BASE + RECOVERY_REG_GPIO_2ND_I2C_MODE,
 				 RECOVERY_GPIO_LAN0_LED0_MODE_MASK |
@@ -212,8 +930,8 @@ static int recovery_led_init(struct recovery_led_ctrl *ctrl)
 				 RECOVERY_GPIO_LAN1_LED1_MODE_MASK, 0);
 
 	for (i = 0; i < RECOVERY_LED_PORTS; i++) {
-		recovery_gpio_direction_output(recovery_green_led_gpios[i]);
-		recovery_gpio_direction_output(recovery_yellow_led_gpios[i]);
+		recovery_gpio_prepare_output(recovery_green_led_gpios[i]);
+		recovery_gpio_prepare_output(recovery_yellow_led_gpios[i]);
 		recovery_led_set_pin(recovery_green_led_gpios[i], 0);
 		recovery_led_set_pin(recovery_yellow_led_gpios[i], 0);
 	}
@@ -526,6 +1244,260 @@ static void recovery_release_target(struct recovery_target *target)
 {
 	if (target->backend == RECOVERY_BACKEND_MTD && target->mtd)
 		put_mtd_device(target->mtd);
+}
+
+static void recovery_service_runtime(struct recovery_status_led_ctrl *status_leds)
+{
+	struct udevice *udev = eth_get_dev();
+	struct netif *netif = net_lwip_get_netif();
+
+	if (udev && netif)
+		net_lwip_rx(udev, netif);
+	recovery_status_led_poll(status_leds);
+	WATCHDOG_RESET();
+}
+
+static int recovery_erase_mtd_region(struct mtd_info *mtd, loff_t ofs,
+				     size_t len,
+				     struct recovery_status_led_ctrl *status_leds)
+{
+	struct erase_info ei = { 0 };
+	loff_t erase_len;
+	int ret;
+
+	if (!mtd || !len)
+		return 0;
+
+	erase_len = ALIGN(len, mtd->erasesize);
+	ei.addr = ofs;
+	ei.len = erase_len;
+
+	ret = mtd_unlock(mtd, ei.addr, ei.len);
+	if (ret && ret != -EOPNOTSUPP) {
+		printf("Warning: initial mtd_unlock 0x%llx..+0x%llx failed: %d\n",
+		       (unsigned long long)ei.addr,
+		       (unsigned long long)ei.len, ret);
+	}
+
+	for (loff_t addr = 0; addr < erase_len; addr += mtd->erasesize) {
+		struct erase_info e = {
+			.addr = ofs + addr,
+			.len = mtd->erasesize,
+		};
+		int tries = 0;
+
+		do {
+			ret = mtd_erase(mtd, &e);
+			if (!ret)
+				break;
+			if (ret == -EROFS || ret == -EACCES)
+				mtd_unlock(mtd, e.addr, e.len);
+			else
+				break;
+		} while (++tries < 2);
+
+		if (ret)
+			return ret;
+
+		prog_erase_done = addr + mtd->erasesize;
+		if (prog_erase_done > prog_erase_total)
+			prog_erase_done = prog_erase_total;
+		prog_done = prog_erase_done + prog_write_done;
+		recovery_service_runtime(status_leds);
+	}
+
+	return 0;
+}
+
+static bool recovery_preserve_ubi_volume(const char *name)
+{
+	if (!name || !*name)
+		return true;
+
+	if (!strcmp(name, "ubootenv") || !strcmp(name, "ubootenv2"))
+		return true;
+
+	if (of_machine_is_compatible("econet,xr1710g") ||
+	    of_machine_is_compatible("econet,xr1710g-ubi"))
+		return !strcmp(name, "caldata");
+
+	if (of_machine_is_compatible("gemtek,w1700k") ||
+	    of_machine_is_compatible("gemtek,w1700k-ubi"))
+		return !strcmp(name, "factory");
+
+	return false;
+}
+
+static int recovery_create_ubi_volume(const char *name, size_t size, int vol_type)
+{
+#if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
+	struct ubi_mkvol_req req;
+	struct ubi_device *ubi;
+	int ret;
+
+	if (!name || !*name)
+		return -EINVAL;
+
+	ubi = ubi_get_device(0);
+	if (!ubi)
+		return -ENODEV;
+
+	if (!size)
+		size = (size_t)ubi->avail_pebs * (size_t)ubi->leb_size;
+
+	memset(&req, 0, sizeof(req));
+	req.vol_id = UBI_VOL_NUM_AUTO;
+	req.alignment = 1;
+	req.bytes = size;
+	req.vol_type = vol_type;
+	req.name_len = strlen(name);
+	if (req.name_len > UBI_VOL_NAME_MAX) {
+		ubi_put_device(ubi);
+		return -ENAMETOOLONG;
+	}
+	memcpy(req.name, name, req.name_len);
+	req.name[req.name_len] = '\0';
+
+	mutex_lock(&ubi->device_mutex);
+	ret = ubi_create_volume(ubi, &req);
+	mutex_unlock(&ubi->device_mutex);
+	ubi_put_device(ubi);
+
+	return ret;
+#else
+	return -ENODEV;
+#endif
+}
+
+static int recovery_remove_ubi_volume(const char *name)
+{
+#if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
+	struct ubi_volume_desc *desc;
+	int ret;
+
+	desc = ubi_open_volume_nm(0, name, UBI_EXCLUSIVE);
+	if (IS_ERR_OR_NULL(desc))
+		return IS_ERR(desc) ? PTR_ERR(desc) : -ENODEV;
+
+	mutex_lock(&desc->vol->ubi->device_mutex);
+	ret = ubi_remove_volume(desc, 0);
+	mutex_unlock(&desc->vol->ubi->device_mutex);
+	ubi_close_volume(desc);
+
+	return ret;
+#else
+	return -ENODEV;
+#endif
+}
+
+static int recovery_ensure_rootfs_data(struct recovery_target *target)
+{
+#if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
+	struct ubi_volume_desc *desc;
+	int ret;
+
+	if (target->backend != RECOVERY_BACKEND_UBI)
+		return 0;
+
+	if (ubi_part((char *)target->ubi_part, NULL))
+		return -ENODEV;
+
+	desc = ubi_open_volume_nm(0, "rootfs_data", UBI_READWRITE);
+	if (!IS_ERR_OR_NULL(desc)) {
+		ubi_close_volume(desc);
+		return 0;
+	}
+
+	ret = recovery_create_ubi_volume("rootfs_data", 0, UBI_DYNAMIC_VOLUME);
+	if (ret && ret != -EEXIST) {
+		printf("Failed to create UBI volume 'rootfs_data': %d\n", ret);
+		return ret;
+	}
+
+	return 0;
+#else
+	return -ENODEV;
+#endif
+}
+
+static int recovery_cleanup_ubi_firmware(struct recovery_target *target,
+					 struct recovery_status_led_ctrl *status_leds,
+					 size_t image_size)
+{
+#if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
+	struct ubi_device *ubi;
+	unsigned long long erase_total = 0;
+	unsigned long long erase_done = 0;
+	int ret = 0;
+	int i;
+
+	if (target->backend != RECOVERY_BACKEND_UBI)
+		return -EINVAL;
+
+	if (ubi_part((char *)target->ubi_part, NULL))
+		return -ENODEV;
+
+	ubi = ubi_get_device(0);
+	if (!ubi)
+		return -ENODEV;
+
+	for (i = 0; i < ubi->vtbl_slots; i++) {
+		struct ubi_volume *vol = ubi->volumes[i];
+
+		if (!vol || vol->vol_id >= UBI_INTERNAL_VOL_START)
+			continue;
+		if (recovery_preserve_ubi_volume(vol->name))
+			continue;
+
+		erase_total += (unsigned long long)vol->reserved_pebs *
+			       (unsigned long long)vol->usable_leb_size;
+	}
+
+	prog_phase = 1;
+	prog_done = 0;
+	prog_erase_done = 0;
+	prog_erase_total = erase_total > UINT_MAX ? UINT_MAX : erase_total;
+	prog_write_done = 0;
+	prog_write_total = image_size;
+	prog_total = prog_erase_total + prog_write_total;
+
+	for (i = 0; i < ubi->vtbl_slots; i++) {
+		struct ubi_volume *vol = ubi->volumes[i];
+		unsigned long long vol_size;
+		char name[UBI_VOL_NAME_MAX + 1];
+
+		if (!vol || vol->vol_id >= UBI_INTERNAL_VOL_START)
+			continue;
+		if (recovery_preserve_ubi_volume(vol->name))
+			continue;
+
+		vol_size = (unsigned long long)vol->reserved_pebs *
+			   (unsigned long long)vol->usable_leb_size;
+		strlcpy(name, vol->name, sizeof(name));
+
+		printf("Removing UBI volume '%s' before flashing '%s'...\n",
+		       name, target->name);
+		ret = recovery_remove_ubi_volume(name);
+		if (ret) {
+			printf("Failed to remove UBI volume '%s': %d\n", name, ret);
+			break;
+		}
+
+		erase_done += vol_size;
+		prog_erase_done = erase_done > prog_erase_total ?
+				  prog_erase_total : erase_done;
+		prog_done = prog_erase_done + prog_write_done;
+		recovery_service_runtime(status_leds);
+	}
+
+	ubi_put_device(ubi);
+	if (ret)
+		return ret;
+
+	return recovery_try_ubi_target(current_target, target);
+#else
+	return -ENODEV;
+#endif
 }
 
 static int recovery_resize_ubi_target(struct recovery_target *target,
@@ -881,7 +1853,7 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
         sys_timeout(1000, post_delay_cb, NULL);
 }
 
-static int flash_image(void)
+static int flash_image(struct recovery_status_led_ctrl *status_leds)
 {
 	struct recovery_target target;
 	size_t retlen;
@@ -909,6 +1881,15 @@ static int flash_image(void)
 	}
 
 	if (target.backend == RECOVERY_BACKEND_UBI) {
+		ret = recovery_cleanup_ubi_firmware(&target, status_leds, recv_off);
+		if (ret) {
+			printf("Failed to clean UBI firmware volumes for '%s': %d\n",
+			       target.name, ret);
+			recovery_release_target(&target);
+			prog_phase = -1;
+			return ret;
+		}
+
 		if (!target.cur_size) {
 			printf("Creating missing UBI volume '%s' for %u bytes...\n",
 			       target.name, recv_off);
@@ -931,31 +1912,38 @@ static int flash_image(void)
 			}
 		}
 
+		ret = recovery_ensure_rootfs_data(&target);
+		if (ret) {
+			recovery_release_target(&target);
+			prog_phase = -1;
+			return ret;
+		}
+
 		printf("Writing %u bytes to UBI volume '%s' on '%s'...\n",
 		       recv_off, target.name, target.ubi_part);
 		prog_phase = 2;
-		prog_done = 0;
-		prog_total = recv_off;
-		prog_erase_done = 0;
-		prog_erase_total = 0;
+		prog_done = prog_erase_total;
 		prog_write_done = 0;
-		prog_write_total = recv_off;
 
 		if (ubi_part((char *)target.ubi_part, NULL)) {
+			recovery_release_target(&target);
 			prog_phase = -1;
 			return -ENODEV;
 		}
 
+		recovery_status_led_poll(status_leds);
 		ret = ubi_volume_write((char *)target.name, recv_base, 0, recv_off);
 		if (ret) {
 			printf("ubi_volume_write failed for '%s': %d\n",
 			       target.name, ret);
+			recovery_release_target(&target);
 			prog_phase = -1;
 			return ret;
 		}
 
 		prog_write_done = recv_off;
-		prog_done = recv_off;
+		prog_done = prog_erase_total + recv_off;
+		recovery_release_target(&target);
 		prog_phase = 3;
 		if (current_target == TARGET_FIRMWARE)
 			xr1710g_sync_caldata();
@@ -965,61 +1953,26 @@ static int flash_image(void)
 
 	{
 		struct mtd_info *mtd = target.mtd;
-		struct erase_info ei = { 0 };
-		struct udevice *udev = eth_get_dev();
-		struct netif *netif = net_lwip_get_netif();
 		loff_t ofs = target.ofs;
+		loff_t erase_len = ALIGN(target.limit, mtd->erasesize);
 
 		prog_phase = 1;
 		prog_done = 0;
 		prog_erase_done = 0;
-		prog_erase_total = ALIGN(recv_off, mtd->erasesize);
+		prog_erase_total = erase_len;
 		prog_write_done = 0;
 		prog_write_total = recv_off;
 		prog_total = prog_erase_total + prog_write_total;
 
-		printf("Erasing and writing %u bytes to '%s'...\n",
-		       recv_off, target.name);
-		ei.addr = ofs;
-		ei.len = ALIGN(recv_off, mtd->erasesize);
-
-		ret = mtd_unlock(mtd, ei.addr, ei.len);
-		if (ret && ret != -EOPNOTSUPP) {
-			printf("Warning: initial mtd_unlock 0x%llx..+0x%x failed: %d\n",
-			       (unsigned long long)ei.addr, (unsigned)ei.len, ret);
-		}
-
-		for (loff_t addr = 0; addr < ei.len; addr += mtd->erasesize) {
-			struct erase_info e = {
-				.addr = ofs + addr,
-				.len = mtd->erasesize,
-			};
-			int tries = 0;
-
-			do {
-				ret = mtd_erase(mtd, &e);
-				if (!ret)
-					break;
-				if (ret == -EROFS || ret == -EACCES)
-					mtd_unlock(mtd, e.addr, e.len);
-				else
-					break;
-			} while (++tries < 2);
-
-			if (ret) {
-				printf("mtd_erase failed: %d\n", ret);
-				recovery_release_target(&target);
-				prog_phase = -1;
-				return ret;
-			}
-
-			prog_erase_done = addr + mtd->erasesize;
-			if (prog_erase_done > prog_erase_total)
-				prog_erase_done = prog_erase_total;
-			prog_done = prog_erase_done + prog_write_done;
-			if (udev && netif)
-				net_lwip_rx(udev, netif);
-			WATCHDOG_RESET();
+		printf("Erasing entire target '%s' (%llu bytes) and writing %u bytes...\n",
+		       target.name, (unsigned long long)target.limit, recv_off);
+		ret = recovery_erase_mtd_region(mtd, ofs, target.limit,
+						status_leds);
+		if (ret) {
+			printf("mtd_erase failed: %d\n", ret);
+			recovery_release_target(&target);
+			prog_phase = -1;
+			return ret;
 		}
 
 		prog_phase = 2;
@@ -1047,9 +2000,7 @@ static int flash_image(void)
 			written += retlen;
 			prog_write_done = written;
 			prog_done = prog_erase_done + prog_write_done;
-			if (udev && netif)
-				net_lwip_rx(udev, netif);
-			WATCHDOG_RESET();
+			recovery_service_runtime(status_leds);
 		}
 	}
 
@@ -1063,72 +2014,108 @@ static int flash_image(void)
 
 int run_http_recovery(void)
 {
-    struct udevice *udev;
-    struct netif *netif;
-    struct recovery_led_ctrl leds;
-    int rx_len;
-    int rc;
+	struct udevice *udev;
+	struct netif *netif;
+	struct recovery_led_ctrl leds;
+	struct recovery_status_led_ctrl status_leds;
+	struct recovery_dhcp_server dhcp;
+	bool use_status_leds = false;
+	int rc;
 
-    recv_off = recv_total = 0;
-    post_ok = 0;
-    upload_done = 0;
-    recovery_led_init(&leds);
+	recv_off = recv_total = 0;
+	post_ok = 0;
+	upload_done = 0;
+	flash_request = 0;
+	reboot_request = 0;
+	memset(&leds, 0, sizeof(leds));
+	rc = recovery_status_led_init(&status_leds);
+	if (!rc) {
+		use_status_leds = true;
+	} else {
+		printf("Recovery status LEDs unavailable (%d), fallback to link LEDs\n",
+		       rc);
+		recovery_led_init(&leds);
+	}
+	recovery_prepare_static_network();
 
-    rc = net_lwip_eth_start();
-    if (rc < 0) {
-        printf("Failed to start Ethernet: %d\n", rc);
-        recovery_led_ctrl_free(&leds);
-        return rc;
-    }
+	rc = net_lwip_eth_start();
+	if (rc < 0) {
+		printf("Failed to start Ethernet: %d\n", rc);
+		recovery_status_led_stop(&status_leds);
+		recovery_status_led_release(&status_leds);
+		recovery_led_ctrl_free(&leds);
+		return rc;
+	}
 
-    udev = eth_get_dev();
-    if (!udev) {
-        printf("No active net device\n");
-        recovery_led_ctrl_free(&leds);
-        return -ENODEV;
-    }
+	udev = eth_get_dev();
+	if (!udev) {
+		printf("No active net device\n");
+		recovery_status_led_stop(&status_leds);
+		recovery_status_led_release(&status_leds);
+		recovery_led_ctrl_free(&leds);
+		eth_halt();
+		return -ENODEV;
+	}
 
-    netif = net_lwip_new_netif(udev);
-    if (!netif) {
-        recovery_led_ctrl_free(&leds);
-        return -ENODEV;
-    }
+	netif = net_lwip_new_netif(udev);
+	if (!netif) {
+		recovery_status_led_stop(&status_leds);
+		recovery_status_led_release(&status_leds);
+		recovery_led_ctrl_free(&leds);
+		eth_halt();
+		return -ENODEV;
+	}
 
-    httpd_init();
-    printf("HTTP recovery server listening on http://192.168.255.1/\n");
+	rc = recovery_dhcp_server_init(&dhcp, netif);
+	if (rc)
+		printf("Failed to start recovery DHCP server: %d\n", rc);
+	else
+		net_lwip_set_recovery_dhcp_hook(recovery_dhcp_recv, &dhcp);
 
-    while (1) {
-        if (tstc()) {
-            int c = getchar();
-            if (c == 0x03) { /* Ctrl-C */
-                printf("Abort by user\n");
-                break;
-            }
-        }
-        /* net_lwip_rx() already runs sys_check_timeouts(). */
-        rx_len = net_lwip_rx(udev, netif);
-        recovery_led_poll(&leds);
-        if (flash_request) {
-            flash_request = 0;
-            printf("Upload done, flashing...\n");
-            rc = flash_image();
-            if (!rc) {
-                printf("Flashing complete. Rebooting in %dms...\n", REBOOT_DELAY_MS);
-                reboot_request = 0;
-                sys_timeout(REBOOT_DELAY_MS, reboot_delay_cb, NULL);
-            }
-            else {
-                printf("Flashing failed: %d. Keeping server running.\n", rc);
-            }
-        }
-        if (reboot_request) {
-            do_reset(NULL, 0, 0, NULL);
-        }
-        WATCHDOG_RESET();
-    }
+	httpd_init();
+	printf("HTTP recovery server listening on http://%s/\n",
+	       ip4addr_ntoa(netif_ip4_addr(netif)));
 
-    net_lwip_remove_netif(netif);
-    eth_halt();
-    recovery_led_ctrl_free(&leds);
-    return 0;
+	while (1) {
+		if (tstc()) {
+			int c = getchar();
+
+			if (c == 0x03) { /* Ctrl-C */
+				printf("Abort by user\n");
+				break;
+			}
+		}
+		/* net_lwip_rx() already runs sys_check_timeouts(). */
+		net_lwip_rx(udev, netif);
+		if (use_status_leds)
+			recovery_status_led_poll(&status_leds);
+		else
+			recovery_led_poll(&leds);
+		if (flash_request) {
+			flash_request = 0;
+			printf("Upload done, flashing...\n");
+			rc = flash_image(&status_leds);
+			if (!rc) {
+				printf("Flashing complete. Rebooting in %dms...\n",
+				       REBOOT_DELAY_MS);
+				reboot_request = 0;
+				sys_timeout(REBOOT_DELAY_MS, reboot_delay_cb, NULL);
+			} else {
+				printf("Flashing failed: %d. Keeping server running.\n",
+				       rc);
+			}
+		}
+		if (reboot_request)
+			do_reset(NULL, 0, 0, NULL);
+		WATCHDOG_RESET();
+	}
+
+	recovery_dhcp_server_stop(&dhcp);
+	net_lwip_set_recovery_dhcp_hook(NULL, NULL);
+	net_lwip_remove_netif(netif);
+	eth_halt();
+	recovery_status_led_stop(&status_leds);
+	recovery_status_led_release(&status_leds);
+	recovery_led_ctrl_free(&leds);
+	return 0;
 }
