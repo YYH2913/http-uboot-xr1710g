@@ -78,6 +78,8 @@
 #define IP_REASS_MAXAGE                 3
 #define IP_REASS_MAX_PBUFS              4
 #define IP_FRAG_USES_STATIC_BUF         0
+#define IP_SOF_BROADCAST                1
+#define IP_SOF_BROADCAST_RECV           1
 
 #define IP_DEFAULT_TTL                  255
 

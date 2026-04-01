@@ -6,6 +6,13 @@
 #include <lwip/ip4.h>
 #include <lwip/netif.h>
 
+struct udp_pcb;
+struct pbuf;
+
+typedef void (*net_lwip_udp_recv_fn)(void *arg, struct udp_pcb *pcb,
+				     struct pbuf *p, const ip_addr_t *addr,
+				     u16_t port);
+
 /* HTTPS authentication mode */
 enum auth_mode {
 	AUTH_NONE,
@@ -35,6 +42,7 @@ int eth_init_state_only(void); /* Set active state */
 
 int net_lwip_dns_init(void);
 int net_lwip_eth_start(void);
+void net_lwip_set_recovery_dhcp_hook(net_lwip_udp_recv_fn recv, void *arg);
 struct netif *net_lwip_new_netif(struct udevice *udev);
 struct netif *net_lwip_new_netif_noip(struct udevice *udev);
 void net_lwip_remove_netif(struct netif *netif);
