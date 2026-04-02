@@ -31,6 +31,10 @@ Screenshot of the web page:
 - `out/xr1710g-chainloader-slot.bin`
   The image that is actually written to the `chainloader` partition.
 
+Upstream reference:
+
+- OpenWrt PR `#22397`: <https://github.com/openwrt/openwrt/pull/22397>
+
 If you are flashing the main system firmware rather than U-Boot, there are two different cases:
 
 - HTTP Recovery web upload
@@ -44,6 +48,29 @@ If you are flashing the main system firmware rather than U-Boot, there are two d
 > - Do not flash `u-boot.bin` directly
 > - Do not treat `u-boot.img` as the final flash image
 > - The final image to flash is the packaged `xr1710g-chainloader-slot.bin`
+
+## Current Partition Layout
+
+The current flash partition layout is:
+
+| Name | Start | Size | End |
+|---|---:|---:|---:|
+| `vendor` | `0x00000000` | `0x00600000` | `0x005FFFFF` |
+| `chainloader` | `0x00600000` | `0x00100000` | `0x006FFFFF` |
+| `ubi` | `0x00700000` | `0x1F700000` | `0x1FDFFFFF` |
+| `reserved_bmt` | `0x1FE00000` | `0x00200000` | `0x1FFFFFFF` |
+
+Inside `vendor`, the original vendor layout is still preserved:
+
+- `bootloader`: `0x00000000-0x001FFFFF`
+- `uenv`: `0x00200000-0x003FFFFF`
+- `dsd`: `0x00400000-0x005FFFFF`
+
+This layout matches the current OP mainline layout.
+In the OpenWrt tree, the upstream XR1710G DTS added by OpenWrt PR `#22397`
+uses the same partition model and the same offsets for `vendor`,
+`chainloader`, `ubi`, and `reserved_bmt`, and it matches the existing
+`an7581-w1700k-ubi.dts` layout as well.
 
 ## Flashing the Primary `tclinux` Slot from OpenWrt
 

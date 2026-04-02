@@ -12,8 +12,10 @@
 
 / {
 	model = "XR1710G";
-	compatible = "econet,xr1710g", "econet,en7581",
-		     "airoha,an7581", "airoha,en7581";
+	compatible = "econet,xr1710g", "econet,xr1710g-ubi",
+		     "gemtek,xr1710g", "gemtek,xr1710g-ubi",
+		     "econet,en7581", "airoha,an7581",
+		     "airoha,en7581";
 	recovery-gpios = <&en7581_pinctrl 0 GPIO_ACTIVE_LOW>;
 	recovery-green-led-gpios = <&en7581_pinctrl 43 GPIO_ACTIVE_LOW>,
 				   <&en7581_pinctrl 44 GPIO_ACTIVE_LOW>;
@@ -189,8 +191,8 @@
 						volname = "fit";
 					};
 
-					ubi_caldata: ubi-volume-caldata {
-						volname = "caldata";
+					ubi_factory: ubi-volume-factory {
+						volname = "factory";
 					};
 				};
 			};
@@ -204,7 +206,7 @@
 		};
 	};
 
-&ubi_caldata {
+&ubi_factory {
 	nvmem-layout {
 		compatible = "fixed-layout";
 		#address-cells = <1>;
@@ -212,6 +214,16 @@
 
 		eeprom: eeprom@0 {
 			reg = <0x0 0x1e00>;
+		};
+
+		wan_mac: macaddr@5000 {
+			reg = <0x5000 0x6>;
+		};
+
+		lan_mac: macaddr@6000 {
+			compatible = "mac-base";
+			reg = <0x6000 0x6>;
+			#nvmem-cell-cells = <1>;
 		};
 	};
 };

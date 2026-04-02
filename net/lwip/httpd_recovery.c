@@ -45,7 +45,7 @@
 
 DECLARE_GLOBAL_DATA_PTR;
 
-int xr1710g_sync_caldata(void);
+int xr1710g_sync_factory(void);
 
 /*
  * Upload buffer
@@ -95,6 +95,8 @@ int xr1710g_sync_caldata(void);
 #define RECOVERY_GPIO_LAN1_LED1_MODE_MASK BIT(6)
 #define RECOVERY_GPIO43_FLASH_MODE_CFG BIT(23)
 #define RECOVERY_GPIO44_FLASH_MODE_CFG BIT(24)
+#define RECOVERY_UBOOTENV_SIZE (1 * 1024 * 1024UL)
+#define RECOVERY_FACTORY_SIZE  (1 * 1024 * 1024UL)
 
 static u8 *recv_base;
 static u32 recv_off;
@@ -1318,8 +1320,10 @@ static bool recovery_preserve_ubi_volume(const char *name)
 		return true;
 
 	if (of_machine_is_compatible("econet,xr1710g") ||
-	    of_machine_is_compatible("econet,xr1710g-ubi"))
-		return !strcmp(name, "caldata");
+	    of_machine_is_compatible("econet,xr1710g-ubi") ||
+	    of_machine_is_compatible("gemtek,xr1710g") ||
+	    of_machine_is_compatible("gemtek,xr1710g-ubi"))
+		return !strcmp(name, "factory");
 
 	if (of_machine_is_compatible("gemtek,w1700k") ||
 	    of_machine_is_compatible("gemtek,w1700k-ubi"))
@@ -1418,6 +1422,72 @@ static int recovery_ensure_rootfs_data(struct recovery_target *target)
 #else
 	return -ENODEV;
 #endif
+}
+
+static int recovery_ensure_ubi_volume_named(const char *name, size_t size,
+					    int vol_type)
+{
+#if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
+	struct ubi_volume_desc *desc;
+	int ret;
+
+	if (!name || !*name)
+		return -EINVAL;
+
+	desc = ubi_open_volume_nm(0, name, UBI_READWRITE);
+	if (!IS_ERR_OR_NULL(desc)) {
+		ubi_close_volume(desc);
+		return 0;
+	}
+
+	ret = recovery_create_ubi_volume(name, size, vol_type);
+	if (ret && ret != -EEXIST) {
+		printf("Failed to create UBI volume '%s': %d\n", name, ret);
+		return ret;
+	}
+
+	return 0;
+#else
+	return -ENODEV;
+#endif
+}
+
+static int recovery_ensure_preserved_ubi_volumes(struct recovery_target *target)
+{
+	int ret;
+
+	if (target->backend != RECOVERY_BACKEND_UBI)
+		return 0;
+
+	if (ubi_part((char *)target->ubi_part, NULL))
+		return -ENODEV;
+
+	ret = recovery_ensure_ubi_volume_named("ubootenv",
+					       RECOVERY_UBOOTENV_SIZE,
+					       UBI_DYNAMIC_VOLUME);
+	if (ret)
+		return ret;
+
+	ret = recovery_ensure_ubi_volume_named("ubootenv2",
+					       RECOVERY_UBOOTENV_SIZE,
+					       UBI_DYNAMIC_VOLUME);
+	if (ret)
+		return ret;
+
+	if (of_machine_is_compatible("econet,xr1710g") ||
+	    of_machine_is_compatible("econet,xr1710g-ubi") ||
+	    of_machine_is_compatible("gemtek,xr1710g") ||
+	    of_machine_is_compatible("gemtek,xr1710g-ubi") ||
+	    of_machine_is_compatible("gemtek,w1700k") ||
+	    of_machine_is_compatible("gemtek,w1700k-ubi")) {
+		ret = recovery_ensure_ubi_volume_named("factory",
+						       RECOVERY_FACTORY_SIZE,
+						       UBI_STATIC_VOLUME);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
 
 static int recovery_cleanup_ubi_firmware(struct recovery_target *target,
@@ -1912,6 +1982,13 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 			}
 		}
 
+		ret = recovery_ensure_preserved_ubi_volumes(&target);
+		if (ret) {
+			recovery_release_target(&target);
+			prog_phase = -1;
+			return ret;
+		}
+
 		ret = recovery_ensure_rootfs_data(&target);
 		if (ret) {
 			recovery_release_target(&target);
@@ -1946,7 +2023,7 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		recovery_release_target(&target);
 		prog_phase = 3;
 		if (current_target == TARGET_FIRMWARE)
-			xr1710g_sync_caldata();
+			xr1710g_sync_factory();
 		printf("Flashing complete.\n");
 		return 0;
 	}
@@ -2007,7 +2084,7 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	recovery_release_target(&target);
 	prog_phase = 3;
 	if (current_target == TARGET_FIRMWARE)
-		xr1710g_sync_caldata();
+		xr1710g_sync_factory();
 	printf("Flashing complete.\n");
 	return 0;
 }
