@@ -36,11 +36,15 @@ DECLARE_GLOBAL_DATA_PTR;
 
 #define XR1710G_VENDOR_PART		"vendor"
 #define XR1710G_UBI_PART		"ubi"
-#define XR1710G_CALDATA_VOL		"caldata"
+#define XR1710G_FACTORY_VOL		"factory"
 #define XR1710G_DSD_OFFSET		0x400000
 #define XR1710G_DSD_ENV_SIZE		0x1000
-#define XR1710G_CALDATA_OFFSET		(XR1710G_DSD_OFFSET + 0x5000)
-#define XR1710G_CALDATA_SIZE		0x1e00
+#define XR1710G_DSD_EEPROM_OFFSET	(XR1710G_DSD_OFFSET + 0x5000)
+#define XR1710G_EEPROM_SIZE		0x1e00
+#define XR1710G_FACTORY_EEPROM_OFFSET	0x0000
+#define XR1710G_FACTORY_WAN_MAC_OFFSET	0x5000
+#define XR1710G_FACTORY_LAN_MAC_OFFSET	0x6000
+#define XR1710G_FACTORY_SIZE		(XR1710G_FACTORY_LAN_MAC_OFFSET + ARP_HLEN)
 
 static const char *const xr1710g_fdt_lan_mac_paths[] = {
 	"/soc/ethernet@1fb50000/ethernet@1",
@@ -54,7 +58,9 @@ static const char *const xr1710g_fdt_wan_mac_paths[] = {
 static bool xr1710g_is_compatible(void)
 {
 	return of_machine_is_compatible("econet,xr1710g") ||
-	       of_machine_is_compatible("econet,xr1710g-ubi");
+	       of_machine_is_compatible("econet,xr1710g-ubi") ||
+	       of_machine_is_compatible("gemtek,xr1710g") ||
+	       of_machine_is_compatible("gemtek,xr1710g-ubi");
 }
 
 static void xr1710g_clrsetbits_le32(uintptr_t addr, u32 clear, u32 set)
@@ -157,12 +163,12 @@ static int xr1710g_read_vendor_data(size_t offset, size_t size, void *buf)
 	return 0;
 }
 
-static int xr1710g_read_dsd_caldata(u8 *buf)
+static int xr1710g_read_dsd_eeprom(u8 *buf)
 {
 	int ret;
 
-	ret = xr1710g_read_vendor_data(XR1710G_CALDATA_OFFSET,
-				       XR1710G_CALDATA_SIZE, buf);
+	ret = xr1710g_read_vendor_data(XR1710G_DSD_EEPROM_OFFSET,
+				       XR1710G_EEPROM_SIZE, buf);
 	if (ret)
 		return ret;
 
@@ -258,11 +264,14 @@ out:
 	return ret;
 }
 
-static int xr1710g_create_caldata_volume(size_t size)
+static int xr1710g_create_ubi_volume(const char *name, size_t size)
 {
 	struct ubi_mkvol_req req;
 	struct ubi_device *ubi;
 	int ret;
+
+	if (!name || !*name)
+		return -EINVAL;
 
 	if (ubi_part(XR1710G_UBI_PART, NULL))
 		return -ENODEV;
@@ -276,8 +285,8 @@ static int xr1710g_create_caldata_volume(size_t size)
 	req.alignment = 1;
 	req.bytes = size;
 	req.vol_type = UBI_STATIC_VOLUME;
-	req.name_len = strlen(XR1710G_CALDATA_VOL);
-	memcpy(req.name, XR1710G_CALDATA_VOL, req.name_len);
+	req.name_len = strlen(name);
+	memcpy(req.name, name, req.name_len);
 	req.name[req.name_len] = '\0';
 
 	mutex_lock(&ubi->device_mutex);
@@ -288,16 +297,19 @@ static int xr1710g_create_caldata_volume(size_t size)
 	return ret;
 }
 
-static int xr1710g_resize_caldata_volume(size_t size)
+static int xr1710g_resize_ubi_volume(const char *name, size_t size)
 {
 	struct ubi_volume_desc *desc;
 	struct ubi_volume *vol;
 	int ret, needed_pebs;
 
+	if (!name || !*name)
+		return -EINVAL;
+
 	if (ubi_part(XR1710G_UBI_PART, NULL))
 		return -ENODEV;
 
-	desc = ubi_open_volume_nm(0, XR1710G_CALDATA_VOL, UBI_EXCLUSIVE);
+	desc = ubi_open_volume_nm(0, name, UBI_EXCLUSIVE);
 	if (IS_ERR_OR_NULL(desc))
 		return IS_ERR(desc) ? PTR_ERR(desc) : -ENODEV;
 
@@ -312,18 +324,21 @@ static int xr1710g_resize_caldata_volume(size_t size)
 	return ret;
 }
 
-static int xr1710g_ensure_caldata_volume(size_t size)
+static int xr1710g_ensure_ubi_volume(const char *name, size_t size)
 {
 	struct ubi_volume_desc *desc;
 	unsigned long long cur_size;
 	int ret;
 
+	if (!name || !*name)
+		return -EINVAL;
+
 	if (ubi_part(XR1710G_UBI_PART, NULL))
 		return -ENODEV;
 
-	desc = ubi_open_volume_nm(0, XR1710G_CALDATA_VOL, UBI_READWRITE);
+	desc = ubi_open_volume_nm(0, name, UBI_READWRITE);
 	if (IS_ERR_OR_NULL(desc)) {
-		ret = xr1710g_create_caldata_volume(size);
+		ret = xr1710g_create_ubi_volume(name, size);
 		if (!ret)
 			return 0;
 		return ret;
@@ -336,36 +351,48 @@ static int xr1710g_ensure_caldata_volume(size_t size)
 	if (size <= cur_size)
 		return 0;
 
-	return xr1710g_resize_caldata_volume(size);
+	return xr1710g_resize_ubi_volume(name, size);
 }
 
-int xr1710g_sync_caldata(void)
+int xr1710g_sync_factory(void)
 {
 	u8 *src = NULL, *dst = NULL;
+	u8 *wan_mac, *lan_mac;
 	bool same = false;
 	int ret = 0;
 
 	if (!xr1710g_is_compatible())
 		return 0;
 
-	src = malloc(XR1710G_CALDATA_SIZE);
-	dst = malloc(XR1710G_CALDATA_SIZE);
+	src = malloc(XR1710G_FACTORY_SIZE);
+	dst = malloc(XR1710G_FACTORY_SIZE);
 	if (!src || !dst) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
-	ret = xr1710g_read_dsd_caldata(src);
+	memset(src, 0xff, XR1710G_FACTORY_SIZE);
+	wan_mac = src + XR1710G_FACTORY_WAN_MAC_OFFSET;
+	lan_mac = src + XR1710G_FACTORY_LAN_MAC_OFFSET;
+
+	ret = xr1710g_read_dsd_eeprom(src + XR1710G_FACTORY_EEPROM_OFFSET);
 	if (ret) {
-		printf("XR1710G: failed to read Wi-Fi calibration from DSD: %d\n",
+		printf("XR1710G: failed to read Wi-Fi EEPROM from DSD: %d\n",
+		       ret);
+		goto out;
+	}
+
+	ret = xr1710g_get_dsd_ethaddrs(lan_mac, wan_mac);
+	if (ret) {
+		printf("XR1710G: failed to read MAC addresses from DSD: %d\n",
 		       ret);
 		goto out;
 	}
 
 	if (!ubi_part(XR1710G_UBI_PART, NULL)) {
-		ret = ubi_volume_read(XR1710G_CALDATA_VOL, (char *)dst, 0,
-				      XR1710G_CALDATA_SIZE);
-		if (!ret && !memcmp(src, dst, XR1710G_CALDATA_SIZE))
+		ret = ubi_volume_read(XR1710G_FACTORY_VOL, (char *)dst, 0,
+				      XR1710G_FACTORY_SIZE);
+		if (!ret && !memcmp(src, dst, XR1710G_FACTORY_SIZE))
 			same = true;
 	}
 
@@ -374,23 +401,24 @@ int xr1710g_sync_caldata(void)
 		goto out;
 	}
 
-	ret = xr1710g_ensure_caldata_volume(XR1710G_CALDATA_SIZE);
+	ret = xr1710g_ensure_ubi_volume(XR1710G_FACTORY_VOL,
+					XR1710G_FACTORY_SIZE);
 	if (ret) {
 		printf("XR1710G: failed to prepare UBI volume '%s': %d\n",
-		       XR1710G_CALDATA_VOL, ret);
+		       XR1710G_FACTORY_VOL, ret);
 		goto out;
 	}
 
-	ret = ubi_volume_write(XR1710G_CALDATA_VOL, src, 0,
-			       XR1710G_CALDATA_SIZE);
+	ret = ubi_volume_write(XR1710G_FACTORY_VOL, src, 0,
+			       XR1710G_FACTORY_SIZE);
 	if (ret) {
 		printf("XR1710G: failed to update UBI volume '%s': %d\n",
-		       XR1710G_CALDATA_VOL, ret);
+		       XR1710G_FACTORY_VOL, ret);
 		goto out;
 	}
 
-	printf("XR1710G: synchronized %u bytes of DSD Wi-Fi calibration to '%s'\n",
-	       XR1710G_CALDATA_SIZE, XR1710G_CALDATA_VOL);
+	printf("XR1710G: synchronized %u bytes of DSD factory data to '%s'\n",
+	       XR1710G_FACTORY_SIZE, XR1710G_FACTORY_VOL);
 
 out:
 	free(src);
@@ -522,7 +550,7 @@ static int xr1710g_recovery_button_pressed(void)
 int board_late_init(void)
 {
 	xr1710g_sync_runtime_ethaddrs();
-	xr1710g_sync_caldata();
+	xr1710g_sync_factory();
 
 	if (!xr1710g_recovery_button_pressed())
 		return 0;
