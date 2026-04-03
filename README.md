@@ -49,6 +49,69 @@ If you are flashing the main system firmware rather than U-Boot, there are two d
 > - Do not treat `u-boot.img` as the final flash image
 > - The final image to flash is the packaged `xr1710g-chainloader-slot.bin`
 
+## Migration From `w1700k-ubi-installer`
+
+If the device is being switched from the older `w1700k-ubi-installer` path to
+the current XR1710G chainloader layout, the first-stage vendor U-Boot
+environment must be checked and usually updated.
+
+The older installer commonly left the first-stage environment with:
+
+```sh
+bootcmd=flash read 0x600000 0x100000 $loadaddr; bootm
+```
+
+That command matched the older `openwrt-airoha-an7581-gemtek_w1700k-ubi-chainload-uboot.itb`
+flow where the FIT image started directly at `0x600000`.
+
+The current `xr1710g-chainloader-slot.bin` keeps the vendor `0x2100`-byte slot
+prefix, so the FIT starts at `0x602100` instead. Because of that, the old
+no-argument `bootm` form is not compatible with the current slot image.
+
+Before expecting automatic boot to work, inspect the current setting in the
+first-stage prompt:
+
+```sh
+printenv bootcmd
+```
+
+The following first-stage forms are confirmed to work with the current
+`xr1710g-chainloader-slot.bin`:
+
+```sh
+flash read 0x602100 0x100000 0x81800000
+bootm 0x81800000
+```
+
+or:
+
+```sh
+flash read 0x600000 0x100000 0x81800000
+bootm 0x81802100
+```
+
+The following old form is not compatible with the current slot image:
+
+```sh
+flash read 0x600000 0x100000 $loadaddr
+bootm
+```
+
+To update the persistent first-stage environment, use one of these `bootcmd`
+values:
+
+```sh
+setenv bootcmd 'flash read 0x602100 0x100000 $loadaddr; bootm 0x81800000'
+saveenv
+```
+
+or:
+
+```sh
+setenv bootcmd 'flash read 0x600000 0x100000 $loadaddr; bootm 0x81802100'
+saveenv
+```
+
 ## Current Partition Layout
 
 The current flash partition layout is:
