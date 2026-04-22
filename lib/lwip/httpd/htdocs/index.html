@@ -64,6 +64,29 @@ h1{
   gap:10px;
   margin-top:22px;
 }
+.force-row{
+  margin-top:14px;
+  padding:12px 14px;
+  border-radius:16px;
+  border:1px solid rgba(26,37,48,.1);
+  background:rgba(255,255,255,.72);
+}
+.force-row label{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  font-size:14px;
+  font-weight:700;
+}
+.force-row input{
+  width:auto;
+  margin:0;
+}
+.force-row p{
+  margin:8px 0 0 0;
+  color:var(--muted);
+  font-size:13px;
+}
 input,select,button{
   width:100%;
   border-radius:14px;
@@ -184,10 +207,12 @@ button:disabled{opacity:.6;cursor:default}
       <div class="target active" id="card-firmware">
         <h2>firmware</h2>
         <p>OpenWrt FIT image</p>
+        <p>Must be at least 1024 KiB</p>
       </div>
       <div class="target" id="card-uboot">
         <h2>uboot</h2>
         <p>`xr1710g-chainloader-slot.bin`</p>
+        <p>Must not exceed 1024 KiB</p>
       </div>
     </div>
 
@@ -198,6 +223,14 @@ button:disabled{opacity:.6;cursor:default}
         <option value="uboot">uboot</option>
       </select>
       <button id="btn" onclick="upload()">Upload</button>
+    </div>
+
+    <div class="force-row" id="force-wrap">
+      <label>
+        <input id="force-recreate" type="checkbox">
+        Force wipe and recreate firmware volumes
+      </label>
+      <p>Removes non-preserved UBI volumes before recreating `ubi:fit`.</p>
     </div>
 
     <div class="progress" id="progress">
@@ -244,12 +277,17 @@ function log(msg) {
 
 function changeTarget() {
   var target = document.getElementById("t").value;
+  var forceWrap = document.getElementById("force-wrap");
+  var forceBox = document.getElementById("force-recreate");
   document.getElementById("card-firmware").className =
     "target" + (target === "firmware" ? " active" : "");
   document.getElementById("card-uboot").className =
     "target" + (target === "uboot" ? " active" : "");
   document.getElementById("btn").className =
     target === "uboot" ? "secondary" : "";
+  forceWrap.style.display = target === "firmware" ? "block" : "none";
+  if (target !== "firmware")
+    forceBox.checked = false;
 }
 
 function setBar(name, pct, detail, state) {
@@ -375,9 +413,24 @@ async function upload() {
   var btn = document.getElementById("btn");
   var file = document.getElementById("f").files[0];
   var target = document.getElementById("t").value;
+  var forceRecreate =
+    target === "firmware" && document.getElementById("force-recreate").checked;
+  var minFirmware = 1024 * 1024;
+  var maxUboot = 1024 * 1024;
+  var payload;
   var xhr = new XMLHttpRequest();
   if (!file) {
     log("No file selected.");
+    return;
+  }
+
+  if (target === "firmware" && file.size < minFirmware) {
+    log("Rejected: firmware image must be at least 1024 KiB.");
+    return;
+  }
+
+  if (target === "uboot" && file.size > maxUboot) {
+    log("Rejected: uboot image must not exceed 1024 KiB.");
     return;
   }
 
@@ -390,9 +443,20 @@ async function upload() {
   countdownStarted = false;
   document.getElementById("reboot-msg").style.display = "none";
   log("Uploading " + file.name + " to " + target + "...");
+  if (forceRecreate)
+    log("Force recreate enabled: non-preserved firmware volumes will be removed.");
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
+  }
+
+  log("Preparing upload buffer...");
+  try {
+    payload = await file.arrayBuffer();
+  } catch (err) {
+    log("Failed to read file: " + err);
+    btn.disabled = false;
+    return;
   }
 
   xhr.upload.addEventListener("progress", function(ev) {
@@ -431,9 +495,10 @@ async function upload() {
     btn.disabled = false;
   });
 
-  xhr.open("POST", "/upload/" + target, true);
+  xhr.open("POST", "/upload/" + target + (forceRecreate ? "?recreate=1" : ""),
+           true);
   xhr.setRequestHeader("Content-Type", "application/octet-stream");
-  xhr.send(file);
+  xhr.send(payload);
 }
 
 (async function() {

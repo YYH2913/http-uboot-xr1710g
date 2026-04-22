@@ -549,6 +549,8 @@ static int xr1710g_recovery_button_pressed(void)
 
 int board_late_init(void)
 {
+	ulong recovery_addr;
+
 	xr1710g_sync_runtime_ethaddrs();
 	xr1710g_sync_factory();
 
@@ -560,8 +562,16 @@ int board_late_init(void)
 	env_set("netmask", "255.255.255.0");
 	env_set("gatewayip", "0.0.0.0");
 
-	if (!env_get("recovery_addr"))
-		env_set_hex("recovery_addr", CONFIG_SYS_LOAD_ADDR);
+	/*
+	 * Keep the recovery upload buffer well away from the low-memory
+	 * boot/load addresses. Large HTTP uploads are staged fully in RAM
+	 * before flashing.
+	 */
+	recovery_addr = gd->ram_base + 0x10000000UL;
+	if ((recovery_addr < gd->ram_base) ||
+	    (recovery_addr >= gd->ram_base + gd->ram_size))
+		recovery_addr = CONFIG_SYS_LOAD_ADDR;
+	env_set_hex("recovery_addr", recovery_addr);
 
 	if (IS_ENABLED(CONFIG_HTTPD_RECOVERY))
 		run_http_recovery();
