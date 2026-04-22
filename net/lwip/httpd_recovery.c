@@ -57,6 +57,7 @@ int xr1710g_sync_factory(void);
 
 /* Delay before reboot after flashing completes, to let browser finish reads */
 #define REBOOT_DELAY_MS        3000
+#define FLASH_START_DELAY_MS   3000
 #define RECOVERY_STATIC_IPADDR           "192.168.255.1"
 #define RECOVERY_STATIC_NETMASK          "255.255.255.0"
 #define RECOVERY_STATIC_GATEWAY          "0.0.0.0"
@@ -97,6 +98,7 @@ int xr1710g_sync_factory(void);
 #define RECOVERY_GPIO44_FLASH_MODE_CFG BIT(24)
 #define RECOVERY_UBOOTENV_SIZE (1 * 1024 * 1024UL)
 #define RECOVERY_FACTORY_SIZE  (1 * 1024 * 1024UL)
+#define RECOVERY_UBI_WRITE_CHUNK (1024 * 1024U)
 
 static u8 *recv_base;
 static u32 recv_off;
@@ -113,6 +115,9 @@ static volatile u32 prog_erase_done;
 static volatile u32 prog_write_total;
 static volatile u32 prog_write_done;
 static volatile int prog_phase; /* 0 idle, 1 erase, 2 write, 3 done, -1 error */
+static unsigned long long prog_erase_volume_base;
+static unsigned long long prog_erase_volume_bytes;
+static struct recovery_status_led_ctrl *prog_status_leds;
 
 static void post_delay_cb(void *arg)
 {
@@ -152,6 +157,7 @@ struct recovery_target {
 	loff_t ofs;
 	unsigned long long cur_size;
 	unsigned long long limit;
+	bool ubi_needs_format;
 };
 
 struct recovery_led_ctrl {
@@ -1116,14 +1122,28 @@ static int recovery_try_ubi_target(enum upload_target tgt,
 #if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
 	struct ubi_volume_desc *desc;
 	struct ubi_device *ubi;
+	struct mtd_info *mtd;
 	const char *volume = env_get(recovery_target_env(tgt));
 	const char *part = recovery_ubi_part(tgt);
 
 	if (!volume)
 		volume = recovery_default_target(tgt);
 
-	if (ubi_part((char *)part, NULL))
-		return -ENODEV;
+	if (ubi_part((char *)part, NULL)) {
+		mtd_probe_devices();
+		mtd = get_mtd_device_nm(part);
+		if (IS_ERR_OR_NULL(mtd))
+			return -ENODEV;
+
+		target->backend = RECOVERY_BACKEND_UBI;
+		target->name = volume;
+		target->ubi_part = part;
+		target->mtd = mtd;
+		target->cur_size = 0;
+		target->limit = mtd->size;
+		target->ubi_needs_format = true;
+		return 0;
+	}
 
 	desc = ubi_open_volume_nm(0, volume, UBI_READWRITE);
 	if (IS_ERR_OR_NULL(desc)) {
@@ -1134,6 +1154,7 @@ static int recovery_try_ubi_target(enum upload_target tgt,
 		target->backend = RECOVERY_BACKEND_UBI;
 		target->name = volume;
 		target->ubi_part = part;
+		target->ubi_needs_format = false;
 		target->cur_size = 0;
 		target->limit = (unsigned long long)ubi->avail_pebs *
 			(unsigned long long)ubi->leb_size;
@@ -1144,6 +1165,7 @@ static int recovery_try_ubi_target(enum upload_target tgt,
 	target->backend = RECOVERY_BACKEND_UBI;
 	target->name = volume;
 	target->ubi_part = part;
+	target->ubi_needs_format = false;
 	target->cur_size = (unsigned long long)desc->vol->reserved_pebs *
 			   (unsigned long long)desc->vol->usable_leb_size;
 	target->limit = (unsigned long long)(desc->vol->reserved_pebs +
@@ -1244,8 +1266,10 @@ static int recovery_resolve_target(enum upload_target tgt,
 
 static void recovery_release_target(struct recovery_target *target)
 {
-	if (target->backend == RECOVERY_BACKEND_MTD && target->mtd)
+	if (target->mtd)
 		put_mtd_device(target->mtd);
+
+	target->mtd = NULL;
 }
 
 static void recovery_service_runtime(struct recovery_status_led_ctrl *status_leds)
@@ -1257,6 +1281,26 @@ static void recovery_service_runtime(struct recovery_status_led_ctrl *status_led
 		net_lwip_rx(udev, netif);
 	recovery_status_led_poll(status_leds);
 	WATCHDOG_RESET();
+}
+
+static void recovery_ubi_progress(struct ubi_volume *vol, int done, int total)
+{
+	unsigned long long bytes_done = prog_erase_volume_base;
+
+	(void)vol;
+
+	if (total > 0)
+		bytes_done += (prog_erase_volume_bytes * (unsigned long long)done) /
+			      (unsigned long long)total;
+
+	if (bytes_done > prog_erase_total)
+		bytes_done = prog_erase_total;
+
+	prog_erase_done = bytes_done;
+	prog_done = prog_erase_done + prog_write_done;
+
+	if (prog_status_leds)
+		recovery_service_runtime(prog_status_leds);
 }
 
 static int recovery_erase_mtd_region(struct mtd_info *mtd, loff_t ofs,
@@ -1424,6 +1468,65 @@ static int recovery_ensure_rootfs_data(struct recovery_target *target)
 #endif
 }
 
+static int recovery_prepare_ubi_target(struct recovery_target *target,
+				       struct recovery_status_led_ctrl *status_leds,
+				       size_t image_size, bool *reformatted)
+{
+#if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
+	struct ubi_device *ubi;
+	loff_t erase_len;
+	int ret;
+
+	if (reformatted)
+		*reformatted = false;
+
+	if (target->backend != RECOVERY_BACKEND_UBI)
+		return -EINVAL;
+
+	if (!target->ubi_needs_format)
+		return ubi_part((char *)target->ubi_part, NULL) ? -ENODEV : 0;
+
+	if (!target->mtd)
+		return -ENODEV;
+
+	erase_len = ALIGN(target->mtd->size, target->mtd->erasesize);
+	prog_phase = 1;
+	prog_done = 0;
+	prog_erase_done = 0;
+	prog_erase_total = erase_len;
+	prog_write_done = 0;
+	prog_write_total = image_size;
+	prog_total = prog_erase_total + prog_write_total;
+
+	printf("UBI partition '%s' is invalid, erasing it to recreate layout...\n",
+	       target->ubi_part);
+	ret = recovery_erase_mtd_region(target->mtd, 0, target->mtd->size,
+					status_leds);
+	if (ret)
+		return ret;
+
+	ret = ubi_part((char *)target->ubi_part, NULL);
+	if (ret)
+		return ret;
+
+	ubi = ubi_get_device(0);
+	if (ubi) {
+		target->limit = (unsigned long long)ubi->avail_pebs *
+				(unsigned long long)ubi->leb_size;
+		ubi_put_device(ubi);
+	}
+
+	target->cur_size = 0;
+	target->ubi_needs_format = false;
+	if (reformatted)
+		*reformatted = true;
+
+	return 0;
+#else
+	return -ENODEV;
+#endif
+}
+
 static int recovery_ensure_ubi_volume_named(const char *name, size_t size,
 					    int vol_type)
 {
@@ -1530,6 +1633,8 @@ static int recovery_cleanup_ubi_firmware(struct recovery_target *target,
 	prog_write_done = 0;
 	prog_write_total = image_size;
 	prog_total = prog_erase_total + prog_write_total;
+	prog_status_leds = status_leds;
+	ubi_set_progress_callback(recovery_ubi_progress);
 
 	for (i = 0; i < ubi->vtbl_slots; i++) {
 		struct ubi_volume *vol = ubi->volumes[i];
@@ -1544,6 +1649,8 @@ static int recovery_cleanup_ubi_firmware(struct recovery_target *target,
 		vol_size = (unsigned long long)vol->reserved_pebs *
 			   (unsigned long long)vol->usable_leb_size;
 		strlcpy(name, vol->name, sizeof(name));
+		prog_erase_volume_base = erase_done;
+		prog_erase_volume_bytes = vol_size;
 
 		printf("Removing UBI volume '%s' before flashing '%s'...\n",
 		       name, target->name);
@@ -1560,11 +1667,95 @@ static int recovery_cleanup_ubi_firmware(struct recovery_target *target,
 		recovery_service_runtime(status_leds);
 	}
 
+	ubi_set_progress_callback(NULL);
+	prog_status_leds = NULL;
 	ubi_put_device(ubi);
 	if (ret)
 		return ret;
 
 	return recovery_try_ubi_target(current_target, target);
+#else
+	return -ENODEV;
+#endif
+}
+
+static int recovery_write_ubi_target(struct recovery_target *target,
+				      struct recovery_status_led_ctrl *status_leds,
+				      const void *image, size_t image_size)
+{
+#if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
+	struct ubi_volume_desc *desc;
+	struct ubi_volume *vol;
+	struct ubi_device *ubi;
+	const u8 *src = image;
+	size_t reserved_bytes;
+	u32 written = 0;
+	int ret;
+
+	if (target->backend != RECOVERY_BACKEND_UBI)
+		return -EINVAL;
+
+	if (ubi_part((char *)target->ubi_part, NULL))
+		return -ENODEV;
+
+	desc = ubi_open_volume_nm(0, target->name, UBI_READWRITE);
+	if (IS_ERR_OR_NULL(desc))
+		return IS_ERR(desc) ? PTR_ERR(desc) : -ENODEV;
+
+	vol = desc->vol;
+	ubi = vol->ubi;
+	reserved_bytes = (size_t)vol->reserved_pebs *
+			 (size_t)(ubi->leb_size - vol->data_pad);
+	if (image_size > reserved_bytes) {
+		ret = -EFBIG;
+		goto out_close;
+	}
+
+	ret = ubi_start_update(ubi, vol, image_size);
+	if (ret)
+		goto out_close;
+
+	/* Flush one runtime cycle so the browser can observe phase 2 before
+	 * the actual UBI data write loop starts.
+	 */
+	recovery_service_runtime(status_leds);
+
+	while (written < image_size) {
+		u32 chunk = image_size - written;
+
+		if (chunk > RECOVERY_UBI_WRITE_CHUNK)
+			chunk = RECOVERY_UBI_WRITE_CHUNK;
+
+		ret = ubi_more_update_data(ubi, vol, src + written, chunk);
+		if (ret < 0)
+			goto out_close;
+
+		written += chunk;
+		prog_write_done = written > prog_write_total ?
+				  prog_write_total : written;
+		prog_done = prog_erase_done + prog_write_done;
+		recovery_service_runtime(status_leds);
+	}
+
+	ret = ubi_check_volume(ubi, vol->vol_id);
+	if (ret < 0) {
+		ret = -ret;
+		goto out_close;
+	}
+
+	if (ret) {
+		ubi_warn(ubi, "volume %d on UBI device %d is corrupt",
+			 vol->vol_id, ubi->ubi_num);
+		vol->corrupted = 1;
+	}
+
+	vol->checked = 1;
+	ubi_gluebi_updated(vol);
+	ret = 0;
+
+out_close:
+	ubi_close_volume(desc);
+	return ret;
 #else
 	return -ENODEV;
 #endif
@@ -1689,7 +1880,7 @@ int fs_open_custom(struct fs_file *file, const char *name)
         p++;
 
 
-    if (!strcmp(p, "status")) {
+	    if (!strcmp(p, "status")) {
         static char page_status[512];
         char json[256];
         int ok = (prog_phase == 3);
@@ -1723,10 +1914,26 @@ int fs_open_custom(struct fs_file *file, const char *name)
         file->data = page_status;
         file->len = hdr_len + body_len; /* actual header + body written */
         file->index = 0;
-        file->flags = FS_FILE_FLAGS_HEADER_INCLUDED; /* header already included */
-        return 1;
-    }
-    else if (!strcmp(p, "about")) {
+	        file->flags = FS_FILE_FLAGS_HEADER_INCLUDED; /* header already included */
+	        return 1;
+	    }
+	    else if (!strcmp(p, "ok")) {
+	        static const char page_ok[] =
+	            "HTTP/1.0 200 OK\r\n"
+	            "Content-Type: text/plain\r\n"
+	            "Cache-Control: no-store\r\n"
+	            "Content-Length: 2\r\n"
+	            "Connection: close\r\n"
+	            "\r\n"
+	            "OK";
+
+	        file->data = page_ok;
+	        file->len = sizeof(page_ok) - 1;
+	        file->index = 0;
+	        file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+	        return 1;
+	    }
+	    else if (!strcmp(p, "about")) {
         static char page_about[384];
         char json[256];
         int json_len =
@@ -1820,6 +2027,7 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
     else if (!strncmp(uri, "/upload", 7) && (uri[7] == '\0' || uri[7] == '?'))
         current_target = TARGET_FIRMWARE;
     else {
+        prog_phase = -1;
         strlcpy(response_uri, "/fail.html", response_uri_len);
         return ERR_ARG;
     }
@@ -1832,6 +2040,7 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
         if (env_max && env_max < max)
             max = env_max; /* allow env to further cap */
         if (content_len <= 0 || (ulong)content_len > max) {
+            prog_phase = -1;
             printf("httpd: content_len %d exceeds allowed max %lu (target limit %lu, ofs 0x%llx)\n",
                    content_len, max, dts_max, (unsigned long long)tmpofs);
             strlcpy(response_uri, "/fail.html", response_uri_len);
@@ -1862,6 +2071,7 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
             else if ((ram_end - recv_total) > ram_start)
                 base = ram_end - recv_total;
             else {
+                prog_phase = -1;
                 printf("httpd: no sufficient RAM for upload (%u bytes)\n", recv_total);
                 strlcpy(response_uri, "/fail.html", response_uri_len);
                 return ERR_MEM;
@@ -1891,10 +2101,10 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p)
 	for (q = p; q != NULL; q = q->next) {
         size_t avail = recv_total - recv_off;
         size_t clen = q->len;
-        if (clen > avail)
-            clen = avail;
-        memcpy(recv_base + recv_off, q->payload, clen);
-        recv_off += clen;
+	        if (clen > avail)
+	            clen = avail;
+	        memcpy(recv_base + recv_off, q->payload, clen);
+	        recv_off += clen;
     }
     pbuf_free(p);
 
@@ -1911,7 +2121,7 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
     printf("httpd: post finished, %u/%u bytes received\n", recv_off, recv_total);
     /* Tell httpd which page to return after POST (keep user on main page) */
     if (post_ok && recv_total && (recv_off >= recv_total))
-        strlcpy(response_uri, "/index.html", response_uri_len);
+        strlcpy(response_uri, "/ok", response_uri_len);
     else
         strlcpy(response_uri, "/fail.html", response_uri_len);
 
@@ -1920,7 +2130,7 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
      * response before erase/write work blocks the network loop.
      */
     if (post_ok && recv_total && (recv_off >= recv_total))
-        sys_timeout(1000, post_delay_cb, NULL);
+        sys_timeout(FLASH_START_DELAY_MS, post_delay_cb, NULL);
 }
 
 static int flash_image(struct recovery_status_led_ctrl *status_leds)
@@ -1951,13 +2161,28 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	}
 
 	if (target.backend == RECOVERY_BACKEND_UBI) {
-		ret = recovery_cleanup_ubi_firmware(&target, status_leds, recv_off);
+		bool reformatted = false;
+
+		ret = recovery_prepare_ubi_target(&target, status_leds, recv_off,
+						      &reformatted);
 		if (ret) {
-			printf("Failed to clean UBI firmware volumes for '%s': %d\n",
-			       target.name, ret);
+			printf("Failed to prepare UBI target '%s' on '%s': %d\n",
+			       target.name, target.ubi_part, ret);
 			recovery_release_target(&target);
 			prog_phase = -1;
 			return ret;
+		}
+
+		if (!reformatted) {
+			ret = recovery_cleanup_ubi_firmware(&target, status_leds,
+							    recv_off);
+			if (ret) {
+				printf("Failed to clean UBI firmware volumes for '%s': %d\n",
+				       target.name, ret);
+				recovery_release_target(&target);
+				prog_phase = -1;
+				return ret;
+			}
 		}
 
 		if (!target.cur_size) {
@@ -1996,25 +2221,19 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 			return ret;
 		}
 
-		printf("Writing %u bytes to UBI volume '%s' on '%s'...\n",
-		       recv_off, target.name, target.ubi_part);
-		prog_phase = 2;
-		prog_done = prog_erase_total;
-		prog_write_done = 0;
-
-		if (ubi_part((char *)target.ubi_part, NULL)) {
-			recovery_release_target(&target);
-			prog_phase = -1;
-			return -ENODEV;
-		}
-
-		recovery_status_led_poll(status_leds);
-		ret = ubi_volume_write((char *)target.name, recv_base, 0, recv_off);
-		if (ret) {
-			printf("ubi_volume_write failed for '%s': %d\n",
-			       target.name, ret);
-			recovery_release_target(&target);
-			prog_phase = -1;
+			printf("Writing %u bytes to UBI volume '%s' on '%s'...\n",
+			       recv_off, target.name, target.ubi_part);
+			prog_phase = 2;
+			prog_done = prog_erase_total;
+			prog_write_done = 0;
+			recovery_service_runtime(status_leds);
+			ret = recovery_write_ubi_target(&target, status_leds,
+							recv_base, recv_off);
+			if (ret) {
+				printf("UBI write failed for '%s': %d\n",
+				       target.name, ret);
+				recovery_release_target(&target);
+				prog_phase = -1;
 			return ret;
 		}
 

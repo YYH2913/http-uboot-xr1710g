@@ -202,6 +202,13 @@ button:disabled{opacity:.6;cursor:default}
 
     <div class="progress" id="progress">
       <div class="progress-row">
+        <div class="progress-label">Upload</div>
+        <div class="progress-bar">
+          <div class="progress-fill inactive" id="upload-fill"></div>
+          <div class="progress-text" id="upload-text">0%</div>
+        </div>
+      </div>
+      <div class="progress-row">
         <div class="progress-label">Erase</div>
         <div class="progress-bar">
           <div class="progress-fill inactive" id="erase-fill"></div>
@@ -226,6 +233,8 @@ button:disabled{opacity:.6;cursor:default}
 var pollTimer = null;
 var lastPhase = 0;
 var countdownStarted = false;
+var pollEpoch = 0;
+var pollOutcome = 0;
 
 function log(msg) {
   var box = document.getElementById("log");
@@ -243,41 +252,52 @@ function changeTarget() {
     target === "uboot" ? "secondary" : "";
 }
 
-function setProgress(phase, pct, detail) {
-  var eraseFill = document.getElementById("erase-fill");
-  var writeFill = document.getElementById("write-fill");
-  var eraseText = document.getElementById("erase-text");
-  var writeText = document.getElementById("write-text");
+function setBar(name, pct, detail, state) {
+  var fill = document.getElementById(name + "-fill");
+  var text = document.getElementById(name + "-text");
+  var safePct = Math.max(0, Math.min(100, Math.round(pct || 0)));
 
+  fill.className = "progress-fill" + (state ? " " + state : "");
+  fill.style.width = safePct + "%";
+  text.textContent = safePct + "%" + (detail || "");
+}
+
+function resetProgress() {
+  setBar("upload", 0, "", "inactive");
+  setBar("erase", 0, "", "inactive");
+  setBar("write", 0, "", "inactive");
+}
+
+function setUploadProgress(pct, detail, complete) {
+  setBar("upload", pct, detail, complete ? "complete" : "");
+  if (lastPhase !== 0)
+    lastPhase = 0;
+}
+
+function setBurnProgress(phase, pct, detail) {
   if (phase === 1) {
-    eraseFill.className = "progress-fill";
-    eraseFill.style.width = pct + "%";
-    eraseText.textContent = pct + "%" + detail;
-    writeFill.className = "progress-fill inactive";
-    writeFill.style.width = "0%";
-    writeText.textContent = "0%";
+    setBar("upload", 100, "", "complete");
+    setBar("erase", pct, detail, "");
+    setBar("write", 0, "", "inactive");
     if (lastPhase !== 1) {
       log("Erasing target...");
       lastPhase = 1;
     }
   } else if (phase === 2) {
-    eraseFill.className = "progress-fill complete";
-    eraseFill.style.width = "100%";
-    eraseText.textContent = "100%";
-    writeFill.className = "progress-fill";
-    writeFill.style.width = pct + "%";
-    writeText.textContent = pct + "%" + detail;
+    setBar("upload", 100, "", "complete");
+    setBar("erase", 100, "", "complete");
+    setBar("write", pct, detail, "");
     if (lastPhase !== 2) {
       log("Writing target...");
       lastPhase = 2;
     }
   } else if (phase === 3) {
-    eraseFill.className = "progress-fill complete";
-    eraseFill.style.width = "100%";
-    eraseText.textContent = "100%";
-    writeFill.className = "progress-fill complete";
-    writeFill.style.width = "100%";
-    writeText.textContent = "100%";
+    setBar("upload", 100, "", "complete");
+    setBar("erase", 100, "", "complete");
+    setBar("write", 100, "", "complete");
+  } else {
+    setBar("erase", 0, "", "inactive");
+    setBar("write", 0, "", "inactive");
   }
 }
 
@@ -300,14 +320,24 @@ function startCountdown(seconds) {
   setTimeout(function() { tick(seconds - 1); }, 1000);
 }
 
-async function pollStatus() {
+async function pollStatus(epoch) {
+  if (epoch !== pollEpoch || pollOutcome !== 0)
+    return;
+
   try {
     var response = await fetch("/status");
+    if (epoch !== pollEpoch || pollOutcome !== 0)
+      return;
+
     var data = await response.json();
+    if (epoch !== pollEpoch || pollOutcome !== 0)
+      return;
+
     if (data.in_progress) {
       var phase = data.phase || 0;
       var pct = 0;
       var detail = "";
+
       if (phase === 1) {
         pct = data.erase_total ? Math.round(data.erase_done * 100 / data.erase_total) : 0;
         detail = " (" + Math.round((data.erase_done || 0) / 1024) + "KB/" +
@@ -317,16 +347,24 @@ async function pollStatus() {
         detail = " (" + Math.round((data.write_done || 0) / 1024) + "KB/" +
                  Math.round((data.write_total || 0) / 1024) + "KB)";
       }
-      setProgress(phase, pct, detail);
+
+      setBurnProgress(phase, pct, detail);
     } else if (data.ok) {
-      setProgress(3, 100, "");
-      log("Upload successful.");
+      pollOutcome = 1;
+      setBurnProgress(3, 100, "");
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      log("Flash successful.");
       startCountdown(3);
-      clearInterval(pollTimer);
     } else if (data.error) {
-      log("Upload failed.");
-      clearInterval(pollTimer);
-      showProgress(false);
+      pollOutcome = -1;
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      log("Flash failed.");
       document.getElementById("btn").disabled = false;
     }
   } catch (err) {
@@ -337,6 +375,7 @@ async function upload() {
   var btn = document.getElementById("btn");
   var file = document.getElementById("f").files[0];
   var target = document.getElementById("t").value;
+  var xhr = new XMLHttpRequest();
   if (!file) {
     log("No file selected.");
     return;
@@ -344,28 +383,57 @@ async function upload() {
 
   btn.disabled = true;
   showProgress(true);
-  lastPhase = 0;
+  lastPhase = -1;
+  pollEpoch++;
+  pollOutcome = 0;
+  resetProgress();
   countdownStarted = false;
   document.getElementById("reboot-msg").style.display = "none";
   log("Uploading " + file.name + " to " + target + "...");
-  if (pollTimer)
+  if (pollTimer) {
     clearInterval(pollTimer);
-  pollTimer = setInterval(pollStatus, 500);
-
-  try {
-    var response = await fetch("/upload/" + target, {
-      method: "POST",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: file
-    });
-    if (!response.ok)
-      log("Server responded with HTTP " + response.status + ".");
-  } catch (err) {
-    log("Upload error: " + err);
-    clearInterval(pollTimer);
-    showProgress(false);
-    btn.disabled = false;
+    pollTimer = null;
   }
+
+  xhr.upload.addEventListener("progress", function(ev) {
+    if (!ev.lengthComputable || ev.total <= 0)
+      return;
+
+    setUploadProgress(
+      ev.loaded * 100 / ev.total,
+      " (" + Math.round((ev.loaded || 0) / 1024) + "KB/" +
+      Math.round((ev.total || 0) / 1024) + "KB)",
+      false
+    );
+  });
+
+  xhr.addEventListener("load", function() {
+    setUploadProgress(100, "", true);
+
+    if (xhr.status < 200 || xhr.status >= 300) {
+      log("Server responded with HTTP " + xhr.status + ".");
+      btn.disabled = false;
+      return;
+    }
+
+    log("Upload finished. Checking burn status...");
+    var epoch = pollEpoch;
+    pollTimer = setInterval(function() { pollStatus(epoch); }, 500);
+    setTimeout(function() { pollStatus(epoch); }, 100);
+  });
+
+  xhr.addEventListener("error", function() {
+    log("Upload error: network request failed.");
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    btn.disabled = false;
+  });
+
+  xhr.open("POST", "/upload/" + target, true);
+  xhr.setRequestHeader("Content-Type", "application/octet-stream");
+  xhr.send(file);
 }
 
 (async function() {
