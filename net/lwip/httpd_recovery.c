@@ -54,6 +54,8 @@ int xr1710g_sync_factory(void);
  */
 /* Default maximum upload size in bytes (override with env 'recovery_max') */
 #define RECOVERY_UPLOAD_MAX    (32 * 1024 * 1024UL)
+#define RECOVERY_MIN_FIRMWARE_SIZE (1 * 1024 * 1024UL)
+#define RECOVERY_MAX_UBOOT_SIZE    (1 * 1024 * 1024UL)
 
 /* Delay before reboot after flashing completes, to let browser finish reads */
 #define REBOOT_DELAY_MS        3000
@@ -143,6 +145,7 @@ enum upload_target {
 	TARGET_UBOOT,
 };
 static enum upload_target current_target = TARGET_FIRMWARE;
+static bool current_force_recreate;
 
 enum recovery_backend {
 	RECOVERY_BACKEND_MTD = 0,
@@ -1376,6 +1379,46 @@ static bool recovery_preserve_ubi_volume(const char *name)
 	return false;
 }
 
+static unsigned long long
+recovery_calc_forced_ubi_limit(struct recovery_target *target)
+{
+#if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
+	struct ubi_device *ubi;
+	unsigned long long limit;
+	int i;
+
+	if (target->backend != RECOVERY_BACKEND_UBI)
+		return target->limit;
+
+	if (ubi_part((char *)target->ubi_part, NULL))
+		return target->limit;
+
+	ubi = ubi_get_device(0);
+	if (!ubi)
+		return target->limit;
+
+	limit = (unsigned long long)ubi->avail_pebs *
+		(unsigned long long)ubi->leb_size;
+
+	for (i = 0; i < ubi->vtbl_slots; i++) {
+		struct ubi_volume *vol = ubi->volumes[i];
+
+		if (!vol || vol->vol_id >= UBI_INTERNAL_VOL_START)
+			continue;
+		if (recovery_preserve_ubi_volume(vol->name))
+			continue;
+
+		limit += (unsigned long long)vol->reserved_pebs *
+			 (unsigned long long)vol->usable_leb_size;
+	}
+
+	ubi_put_device(ubi);
+	return limit;
+#else
+	return target->limit;
+#endif
+}
+
 static int recovery_create_ubi_volume(const char *name, size_t size, int vol_type)
 {
 #if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
@@ -1848,10 +1891,12 @@ static int recovery_create_ubi_target(struct recovery_target *target,
 
 /* Determine maximum payload size based on selected target and DTS-defined MTD
  * layout. Returns 0 on error. */
-static unsigned long recovery_calc_target_max(enum upload_target tgt, loff_t *p_ofs)
+static unsigned long recovery_calc_target_max(enum upload_target tgt,
+					      bool force_recreate, loff_t *p_ofs)
 {
 	struct recovery_target target;
 	unsigned long limit = 0;
+	unsigned long long effective_limit;
 
 	if (recovery_resolve_target(tgt, &target))
 		return 0;
@@ -1859,7 +1904,12 @@ static unsigned long recovery_calc_target_max(enum upload_target tgt, loff_t *p_
 	if (p_ofs)
 		*p_ofs = target.ofs;
 
-	limit = (target.limit > ULONG_MAX) ? ULONG_MAX : (unsigned long)target.limit;
+	effective_limit = target.limit;
+	if (force_recreate && tgt == TARGET_FIRMWARE)
+		effective_limit = recovery_calc_forced_ubi_limit(&target);
+
+	limit = (effective_limit > ULONG_MAX) ? ULONG_MAX :
+		(unsigned long)effective_limit;
 	recovery_release_target(&target);
 
 	return limit;
@@ -2002,9 +2052,13 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
                        u16_t response_uri_len, u8_t *post_auto_wnd)
 {
     (void)http_request; (void)http_request_len; (void)connection;
-    /* Use automatic window management and keep the request path simple. */
+    /*
+     * Throttle large uploads explicitly: XR1710G recovery accepts firmware
+     * images that are much larger than a typical lwIP POST body and manual
+     * window updates avoid over-optimistic receive windows.
+     */
     if (post_auto_wnd)
-        *post_auto_wnd = 1;
+        *post_auto_wnd = 0;
 
     post_ok = 0;
     upload_done = 0;
@@ -2018,6 +2072,7 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
     prog_erase_total = 0;
     prog_write_done = 0;
     prog_write_total = 0;
+    current_force_recreate = false;
 
 	    /* Accept optional query parameters after the target path. */
     if (!strncmp(uri, "/upload/firmware", 16) && (uri[16] == '\0' || uri[16] == '?'))
@@ -2032,17 +2087,38 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
         return ERR_ARG;
     }
 
+    if (current_target == TARGET_FIRMWARE &&
+        (strstr(uri, "?recreate=1") || strstr(uri, "&recreate=1") ||
+         strstr(uri, "?force_recreate=1") || strstr(uri, "&force_recreate=1")))
+        current_force_recreate = true;
+
     {
+        ulong min = 0;
         ulong env_max = env_get_hex("recovery_max", 0);
         loff_t tmpofs = 0;
-        ulong dts_max = recovery_calc_target_max(current_target, &tmpofs);
+        ulong dts_max = recovery_calc_target_max(current_target,
+                                                 current_force_recreate,
+                                                 &tmpofs);
         ulong max = dts_max ? dts_max : RECOVERY_UPLOAD_MAX;
+
+        if (current_target == TARGET_FIRMWARE)
+            min = RECOVERY_MIN_FIRMWARE_SIZE;
+        else if (current_target == TARGET_UBOOT &&
+                 max > RECOVERY_MAX_UBOOT_SIZE)
+            max = RECOVERY_MAX_UBOOT_SIZE;
+
         if (env_max && env_max < max)
             max = env_max; /* allow env to further cap */
-        if (content_len <= 0 || (ulong)content_len > max) {
+        if (content_len <= 0 || (ulong)content_len > max ||
+            (min && (ulong)content_len < min)) {
             prog_phase = -1;
-            printf("httpd: content_len %d exceeds allowed max %lu (target limit %lu, ofs 0x%llx)\n",
-                   content_len, max, dts_max, (unsigned long long)tmpofs);
+            if (min && (ulong)content_len < min) {
+                printf("httpd: content_len %d below allowed min %lu for target %d\n",
+                       content_len, min, current_target);
+            } else {
+                printf("httpd: content_len %d exceeds allowed max %lu (target limit %lu, ofs 0x%llx)\n",
+                       content_len, max, dts_max, (unsigned long long)tmpofs);
+            }
             strlcpy(response_uri, "/fail.html", response_uri_len);
             return ERR_ARG;
         }
@@ -2083,14 +2159,16 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
     post_ok = 1;
     /* Leave response_uri untouched here so the POST can complete normally. */
     const char *tname = current_target == TARGET_FIRMWARE ? "firmware" : "uboot";
-    printf("httpd: accepting upload of %u bytes for %s to 0x%08lx\n",
-           recv_total, tname, (ulong)recv_base);
+    printf("httpd: accepting upload of %u bytes for %s to 0x%08lx%s\n",
+           recv_total, tname, (ulong)recv_base,
+           current_force_recreate ? " (force recreate)" : "");
     return ERR_OK;
 }
 
 err_t httpd_post_receive_data(void *connection, struct pbuf *p)
 {
 	struct pbuf *q;
+	u16_t recved = 0;
 
 	if (!post_ok) {
 		pbuf_free(p);
@@ -2106,11 +2184,17 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p)
 	        memcpy(recv_base + recv_off, q->payload, clen);
 	        recv_off += clen;
     }
+    recved = p->tot_len;
     pbuf_free(p);
 
     if (recv_off >= recv_total) {
         upload_done = 1;
     }
+
+#if LWIP_HTTPD_POST_MANUAL_WND
+    if (recved)
+        httpd_post_data_recved(connection, recved);
+#endif
 
     return ERR_OK;
 }
@@ -2152,6 +2236,10 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		return ret;
 	}
 
+	if (current_force_recreate && current_target == TARGET_FIRMWARE &&
+	    target.backend == RECOVERY_BACKEND_UBI)
+		target.limit = recovery_calc_forced_ubi_limit(&target);
+
 	if (recv_off > target.limit) {
 		printf("Image size %u exceeds target size %llu\n",
 		       recv_off, target.limit);
@@ -2162,6 +2250,9 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 
 	if (target.backend == RECOVERY_BACKEND_UBI) {
 		bool reformatted = false;
+
+		if (current_force_recreate && current_target == TARGET_FIRMWARE)
+			printf("Force recreate requested: removing non-preserved UBI volumes before flashing.\n");
 
 		ret = recovery_prepare_ubi_target(&target, status_leds, recv_off,
 						      &reformatted);

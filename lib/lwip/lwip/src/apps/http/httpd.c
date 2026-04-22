@@ -1815,23 +1815,32 @@ http_post_request(struct pbuf *inp, struct http_state *hs,
 
   if (crlfcrlf != NULL) {
     /* search for "Content-Length: " */
-#define HTTP_HDR_CONTENT_LEN                "Content-Length: "
-#define HTTP_HDR_CONTENT_LEN_LEN            16
+#define HTTP_HDR_CONTENT_LEN                "Content-Length:"
+#define HTTP_HDR_CONTENT_LEN_LEN            15
 #define HTTP_HDR_CONTENT_LEN_DIGIT_MAX_LEN  10
-    char *scontent_len = lwip_strnstr(uri_end + 1, HTTP_HDR_CONTENT_LEN, crlfcrlf - (uri_end + 1));
+    char *scontent_len = lwip_strnistr(uri_end + 1, HTTP_HDR_CONTENT_LEN, crlfcrlf - (uri_end + 1));
     if (scontent_len != NULL) {
-      char *scontent_len_end = lwip_strnstr(scontent_len + HTTP_HDR_CONTENT_LEN_LEN, CRLF, HTTP_HDR_CONTENT_LEN_DIGIT_MAX_LEN);
+      char *content_len_num = scontent_len + HTTP_HDR_CONTENT_LEN_LEN;
+      while ((content_len_num < crlfcrlf) &&
+             ((*content_len_num == ' ') || (*content_len_num == '\t'))) {
+        content_len_num++;
+      }
+      char *scontent_len_end = lwip_strnstr(content_len_num, CRLF,
+                                            LWIP_MIN((size_t)(crlfcrlf - content_len_num),
+                                                     (size_t)(HTTP_HDR_CONTENT_LEN_DIGIT_MAX_LEN + 8)));
       if (scontent_len_end != NULL) {
         int content_len;
-        char *content_len_num = scontent_len + HTTP_HDR_CONTENT_LEN_LEN;
         content_len = atoi(content_len_num);
         if (content_len == 0) {
           /* if atoi returns 0 on error, fix this */
-          if ((content_len_num[0] != '0') || (content_len_num[1] != '\r')) {
+          if ((content_len_num[0] != '0') || ((content_len_num[1] != '\r') &&
+              (content_len_num[1] != '\n'))) {
             content_len = -1;
           }
         }
         if (content_len >= 0) {
+          printf("httpd: POST headers accepted, content_len=%d data_len=%u\n",
+                 content_len, data_len);
           /* adjust length of HTTP header passed to application */
           const char *hdr_start_after_uri = uri_end + 1;
           u16_t hdr_len = (u16_t)LWIP_MIN(data_len, crlfcrlf + 4 - data);
@@ -1879,11 +1888,30 @@ http_post_request(struct pbuf *inp, struct http_state *hs,
             return http_find_file(hs, http_uri_buf, 0);
           }
         } else {
+          printf("httpd: invalid POST Content-Length header\n");
           LWIP_DEBUGF(HTTPD_DEBUG, ("POST received invalid Content-Length: %s\n",
                                     content_len_num));
           return ERR_ARG;
         }
       }
+    }
+    {
+      char *stransfer_enc =
+        lwip_strnistr(uri_end + 1, "Transfer-Encoding:",
+                      crlfcrlf - (uri_end + 1));
+      char *schunked = NULL;
+      size_t dump_len = LWIP_MIN((size_t)(crlfcrlf - data + 4), (size_t)512);
+
+      if (stransfer_enc != NULL) {
+        schunked = lwip_strnistr(stransfer_enc, "chunked",
+                                 crlfcrlf - stransfer_enc);
+      }
+
+      printf("httpd: POST header missing Content-Length%s%s\n",
+             stransfer_enc ? ", has Transfer-Encoding" : "",
+             schunked ? " (chunked)" : "");
+      printf("httpd: raw header (%u bytes):\n%.*s\n",
+             (unsigned)dump_len, (int)dump_len, data);
     }
     /* If we come here, headers are fully received (double-crlf), but Content-Length
        was not included. Since this is currently the only supported method, we have

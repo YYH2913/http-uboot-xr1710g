@@ -120,8 +120,8 @@ The current flash partition layout is:
 |---|---:|---:|---:|
 | `vendor` | `0x00000000` | `0x00600000` | `0x005FFFFF` |
 | `chainloader` | `0x00600000` | `0x00100000` | `0x006FFFFF` |
-| `ubi` | `0x00700000` | `0x1F700000` | `0x1FDFFFFF` |
-| `reserved_bmt` | `0x1FE00000` | `0x00200000` | `0x1FFFFFFF` |
+| `ubi` | `0x00700000` | `0x1D9C0000` | `0x1E0BFFFF` |
+| `reserved_bmt` | `0x1E0C0000` | `0x01F40000` | `0x1FFFFFFF` |
 
 Inside `vendor`, the original vendor layout is still preserved:
 
@@ -131,9 +131,8 @@ Inside `vendor`, the original vendor layout is still preserved:
 
 This layout matches the current OP mainline layout.
 In the OpenWrt tree, the upstream XR1710G DTS added by OpenWrt PR `#22397`
-uses the same partition model and the same offsets for `vendor`,
-`chainloader`, `ubi`, and `reserved_bmt`, and it matches the existing
-`an7581-w1700k-ubi.dts` layout as well.
+uses the same partition model as the local U-Boot/OpenWrt tree for
+`vendor`, `chainloader`, `ubi`, and `reserved_bmt`.
 
 ## Flashing the Primary `tclinux` Slot from OpenWrt
 

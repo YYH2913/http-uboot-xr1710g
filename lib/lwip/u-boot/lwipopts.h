@@ -64,8 +64,8 @@
 
 #define MEM_ALIGNMENT                   8
 
-#define MEMP_NUM_TCP_SEG                16
-#define PBUF_POOL_SIZE                  8
+#define MEMP_NUM_TCP_SEG                128
+#define PBUF_POOL_SIZE                  64
 
 #define LWIP_ARP                        1
 #define ARP_TABLE_SIZE                  4
@@ -185,15 +185,16 @@
 #if defined(CONFIG_HTTPD_RECOVERY)
 #define LWIP_HTTPD_DYNAMIC_HEADERS              1
 #define LWIP_HTTPD_SUPPORT_POST                 1
+#define LWIP_HTTPD_POST_MANUAL_WND              1
 #define LWIP_HTTPD_CUSTOM_FILES                 1
 #define LWIP_HTTPD_CGI                          0
 #define LWIP_HTTPD_SSI                          0
-#define LWIP_HTTPD_MAX_REQ_LENGTH               4096
+#define LWIP_HTTPD_MAX_REQ_LENGTH               16384
 #define LWIP_HTTPD_MAX_REQUEST_URI_LEN          64
 #define LWIP_HTTPD_POST_MAX_RESPONSE_URI_LEN    64
 #define LWIP_HTTPD_SUPPORT_REQUESTLIST          1
-#define LWIP_HTTPD_REQ_BUFSIZE                  8192
-#define LWIP_HTTPD_REQ_QUEUELEN                 20
+#define LWIP_HTTPD_REQ_BUFSIZE                  16384
+#define LWIP_HTTPD_REQ_QUEUELEN                 64
 #endif
 
 #endif /* LWIP_UBOOT_LWIPOPTS_H */

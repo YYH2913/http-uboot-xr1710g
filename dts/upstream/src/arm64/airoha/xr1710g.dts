@@ -161,10 +161,10 @@
 			read-only;
 		};
 
-			partition@700000 {
-				label = "ubi";
-				reg = <0x00700000 0x1f700000>;
-				compatible = "linux,ubi";
+				partition@700000 {
+					label = "ubi";
+					reg = <0x00700000 0x1d9c0000>;
+					compatible = "linux,ubi";
 
 				volumes {
 					ubi-volume-ubootenv {
@@ -197,12 +197,16 @@
 				};
 			};
 
-			/* reserved for bad block table */
-			reserved_bmt@1fe00000 {
-				label = "reserved_bmt";
-				reg = <0x1fe00000 0x00200000>;
-				read-only;
-			};
+				/*
+				 * Reserve the final 250 eraseblocks for the stock
+				 * bootloader's BMT/BBT handling on the 512 MiB
+				 * SPI-NAND.
+				 */
+				reserved_bmt@1e0c0000 {
+					label = "reserved_bmt";
+					reg = <0x1e0c0000 0x01f40000>;
+					read-only;
+				};
 		};
 	};
 
