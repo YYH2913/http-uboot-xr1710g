@@ -49,6 +49,109 @@ If you are flashing the main system firmware rather than U-Boot, there are two d
 > - Do not treat `u-boot.img` as the final flash image
 > - The final image to flash is the packaged `xr1710g-chainloader-slot.bin`
 
+## Flash From ECNT Stock U-Boot
+
+This section applies to units still using the original ECNT / AXON first-stage
+U-Boot. The known stock environment reports:
+
+```sh
+ver=U-Boot 2014.04-rc1 (Mar 15 2024 - 15:13:21) AXON 1.6
+version=1.6
+vendor=ecnt
+board=an7581_evb
+loadaddr=0x81800000
+fdt_high=0xac000000
+bootcmd=flash read 0x602100 0x4000000 $loadaddr; bootm
+ipaddr=192.168.0.1
+serverip=192.168.0.205
+bootfile=tclinux.bin
+kernel_filename=tclinux.bin
+uboot_filename=tcboot.bin
+```
+
+For this stock environment, keep the default `bootcmd` unchanged. The packaged
+slot image keeps the vendor `0x2100`-byte slot prefix, so the FIT image starts
+at flash offset `0x602100`. That matches the ECNT default command:
+
+```sh
+flash read 0x602100 0x4000000 $loadaddr
+bootm
+```
+
+If the boot-critical variables do not match the values above, check only the
+minimal set first:
+
+```sh
+printenv bootcmd loadaddr fdt_high
+```
+
+For the current chainloader slot image, the expected values are:
+
+```sh
+bootcmd=flash read 0x602100 0x4000000 $loadaddr; bootm
+loadaddr=0x81800000
+fdt_high=0xac000000
+```
+
+To change a mismatched ECNT first-stage environment back to these values:
+
+```sh
+setenv loadaddr 0x81800000
+setenv fdt_high 0xac000000
+setenv bootcmd 'flash read 0x602100 0x4000000 $loadaddr; bootm'
+saveenv
+reset
+```
+
+Do not copy a full `printenv` from another device. Board-specific values such
+as `ethaddr`, `bootargs`, GPIO settings, serial data, and vendor/product fields
+should be preserved unless there is a separate reason to change them.
+
+The image to write is still:
+
+```text
+out/xr1710g-chainloader-slot.bin
+```
+
+Do not replace the ECNT default with the older `0x600000` no-argument form:
+
+```sh
+flash read 0x600000 0x100000 $loadaddr
+bootm
+```
+
+That older form reads the vendor slot prefix into `$loadaddr`, so no-argument
+`bootm` does not start at the FIT header.
+
+After flashing the slot image, the ECNT prompt can be used to validate the
+first-stage handoff manually:
+
+```sh
+printenv ver version vendor board bootcmd loadaddr fdt_high
+flash read 0x602100 0x4000000 $loadaddr
+bootm
+```
+
+If variable expansion is inconvenient, use the default address explicitly:
+
+```sh
+flash read 0x602100 0x4000000 0x81800000
+bootm 0x81800000
+```
+
+The earlier bug where the log reached `Starting kernel ...` and then stopped
+was observed on this same AXON 1.6 stock U-Boot line. In that failure mode the
+shim could be entered from a FIT image reported at `0x89000000`, while the
+control DTB still used the default `fit-base = 0x81800000`. The current shim
+keeps `0x81800000` as the default and adds a fallback search for the AXON 1.6
+handoff address, so the ECNT environment should not be changed just to work
+around that bug.
+
+The ECNT `flash` command is vendor-specific. This README intentionally does
+not provide an unverified raw `flash write` command for the stock prompt; use a
+known-good vendor update path or the OpenWrt `nandwrite` flow below for the
+persistent write.
+
 ## Migration From `w1700k-ubi-installer`
 
 If the device is being switched from the older `w1700k-ubi-installer` path to
