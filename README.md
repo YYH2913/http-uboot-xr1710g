@@ -7,18 +7,141 @@ This is a customized U-Boot port for the XR1710G. Its main features are:
 - Built-in DHCP server so a connected PC can obtain an address automatically in recovery mode
 - Recovery page address: `http://192.168.255.1`
 
-## Entering HTTP Recovery
+## Flashing Summary
 
-1. Connect your PC to the 10GbE port and leave the NIC in DHCP / automatic address mode.
+Use this section as the short operational checklist. The detailed background
+and rationale are folded below.
+
+### 1. HTTP Recovery Web Flash
+
+Use this after the custom U-Boot is installed and you only want to update the
+main OpenWrt firmware.
+
+1. Connect the PC to the 10GbE port and leave the PC NIC in DHCP mode.
 2. Power on the router.
 3. Once the 10GbE port LED starts blinking, press and hold the `reset` button.
-4. If you are unsure about the timing, you can wait a few more seconds. Because of the chainloader, there is a fairly large timing margin here.
-5. Keep holding the button until the status LED changes from solid red to a flowing pattern, which indicates that HTTP Recovery has started.
-6. Open `http://192.168.255.1` in your browser.
+4. If you are unsure about the timing, wait a few more seconds. Because of the
+   chainloader, there is a fairly large timing margin here.
+5. Release the button after the status LED changes from solid red to the
+   flowing recovery pattern.
+6. Open `http://192.168.255.1`.
+7. Select the upload target:
+   - `firmware` writes the OpenWrt-generated `*-sysupgrade.itb` to `ubi:fit`.
+   - `uboot` writes `xr1710g-chainloader-slot.bin` to the raw chainloader slot.
+8. For normal same-layout firmware upgrades, leave `Force wipe and recreate
+   firmware volumes` unchecked.
+9. For cross-partition or UBI volume layout upgrades, check `Force wipe and
+   recreate firmware volumes`, then upload the `firmware` image. This removes
+   non-preserved UBI volumes before recreating `ubi:fit`, while keeping or
+   recreating the preserved volumes such as `ubootenv`, `ubootenv2`, and
+   `factory`. This option only applies to the `firmware` target.
 
-Screenshot of the web page:
+HTTP Recovery page screenshot:
 
 ![HTTP Recovery page screenshot](./image.png)
+
+Do not upload `u-boot.bin`, `u-boot.img`, or `xr1710g-ubi.img` through HTTP
+Recovery. Use `xr1710g-chainloader-slot.bin` only with the `uboot` target.
+
+> [!WARNING]
+> - Do not flash `u-boot.bin` directly.
+> - Do not treat `u-boot.img` as the final flash image.
+> - The U-Boot/chainloader image to write is `out/xr1710g-chainloader-slot.bin`.
+> - For main OpenWrt firmware, HTTP Recovery uses `*-sysupgrade.itb`, while
+>   low-level raw flashing uses `out/xr1710g-ubi.img`.
+
+### 2. OpenWrt / Linux `nandwrite` on the Legacy Layout
+
+Use this when the device is still running Linux with the original vendor
+layout and the active slot is still named `tclinux`.
+
+Copy the image to the router:
+
+```sh
+scp out/xr1710g-chainloader-slot.bin root@<router-ip>:/tmp/
+```
+
+On the router:
+
+```sh
+grep -E 'tclinux|tclinux_slave' /proc/mtd
+
+# If the primary slot is /dev/mtd5, back up and replace only its first 1 MiB.
+nanddump -l 0x100000 -f /tmp/tclinux-head-1m.bin /dev/mtd5
+flash_erase /dev/mtd5 0 8
+nandwrite -p /dev/mtd5 /tmp/xr1710g-chainloader-slot.bin
+
+sync
+reboot
+```
+
+Do not use `sysupgrade` for this U-Boot/chainloader write, and do not overwrite
+the whole `64 MiB` `tclinux` slot.
+
+### 3. ECNT Stock U-Boot Prompt
+
+Use the stock ECNT / AXON prompt to verify environment and RAM boot behavior.
+
+Expected boot-critical environment:
+
+```sh
+printenv bootcmd loadaddr fdt_high
+
+setenv loadaddr 0x81800000
+setenv fdt_high 0xac000000
+setenv bootcmd 'flash read 0x602100 0x4000000 $loadaddr; bootm'
+saveenv
+```
+
+RAM-only TFTP validation with the slot image:
+
+```sh
+setenv ipaddr 192.168.0.1
+setenv serverip 192.168.0.205
+tftpboot 0x81800000 xr1710g-chainloader-slot.bin
+bootm 0x81802100
+```
+
+RAM-only TFTP validation with the bare FIT artifact:
+
+```sh
+setenv ipaddr 192.168.0.1
+setenv serverip 192.168.0.205
+tftpboot 0x81800000 xr1710g-chainloader.itb
+bootm 0x81800000
+```
+
+### 4. Migration from `w1700k-ubi-installer`
+
+If the first-stage boot command was changed by the older installer, fix it
+before expecting the current `xr1710g-chainloader-slot.bin` to boot
+automatically.
+
+Check the current command:
+
+```sh
+printenv bootcmd
+```
+
+Use one of these compatible forms:
+
+```sh
+setenv bootcmd 'flash read 0x602100 0x100000 $loadaddr; bootm 0x81800000'
+saveenv
+```
+
+or:
+
+```sh
+setenv bootcmd 'flash read 0x600000 0x100000 $loadaddr; bootm 0x81802100'
+saveenv
+```
+
+Then use the OpenWrt/Linux `nandwrite` flow above or a known-good vendor update
+path to write the actual image.
+
+<details>
+<summary>Flash image notes</summary>
 
 ## Flash Image Notes
 
@@ -35,19 +158,15 @@ Upstream reference:
 
 - OpenWrt PR `#22397`: <https://github.com/openwrt/openwrt/pull/22397>
 
-If you are flashing the main system firmware rather than U-Boot, there are two different cases:
-
-- HTTP Recovery web upload
-  Upload the OpenWrt-generated `*-sysupgrade.itb`
-  This file is written to the `fit` volume inside the `ubi` partition
-- Low-level raw flashing
-  You may use `out/xr1710g-ubi.img`
-  This is a raw system image for the whole `ubi` partition, not the file used for HTTP Recovery upload
-
 > [!WARNING]
 > - Do not flash `u-boot.bin` directly
 > - Do not treat `u-boot.img` as the final flash image
 > - The final image to flash is the packaged `xr1710g-chainloader-slot.bin`
+
+</details>
+
+<details>
+<summary>ECNT stock U-Boot details</summary>
 
 ## Flash From ECNT Stock U-Boot
 
@@ -152,6 +271,11 @@ not provide an unverified raw `flash write` command for the stock prompt; use a
 known-good vendor update path or the OpenWrt `nandwrite` flow below for the
 persistent write.
 
+</details>
+
+<details>
+<summary>Migration from w1700k-ubi-installer details</summary>
+
 ## Migration From `w1700k-ubi-installer`
 
 If the device is being switched from the older `w1700k-ubi-installer` path to
@@ -215,6 +339,11 @@ setenv bootcmd 'flash read 0x600000 0x100000 $loadaddr; bootm 0x81802100'
 saveenv
 ```
 
+</details>
+
+<details>
+<summary>Current partition layout details</summary>
+
 ## Current Partition Layout
 
 The current flash partition layout is:
@@ -236,6 +365,11 @@ This layout matches the current OP mainline layout.
 In the OpenWrt tree, the upstream XR1710G DTS added by OpenWrt PR `#22397`
 uses the same partition model as the local U-Boot/OpenWrt tree for
 `vendor`, `chainloader`, `ubi`, and `reserved_bmt`.
+
+</details>
+
+<details>
+<summary>OpenWrt legacy tclinux flashing details</summary>
 
 ## Flashing the Primary `tclinux` Slot from OpenWrt
 
@@ -275,6 +409,11 @@ Additional notes:
 - These commands apply to the old layout where the primary slot is `tclinux`
 - If the device has already been migrated to the new `vendor + chainloader + ubi` layout, write the `chainloader` partition directly instead of writing `tclinux`
 
+</details>
+
+<details>
+<summary>Why the raw build artifact cannot be flashed directly</summary>
+
 ## Why the Raw Build Artifact Cannot Be Flashed Directly
 
 The vendor boot chain follows a `bootm` path and cannot boot a bare `u-boot.bin` directly.
@@ -282,6 +421,11 @@ The vendor boot chain follows a `bootm` path and cannot boot a bare `u-boot.bin`
 Because of that, the U-Boot in this project is used as a secondary payload. An outer wrapper with a Linux `Image`-style header and a chainloader package must be added so that the vendor `bootm` path will accept it. That outer wrapper first boots a shim, and the shim then jumps to the real `u-boot.bin`.
 
 In other words, the U-Boot artifact produced by the build cannot be flashed directly. It must first be packaged into a chainloader image with the required Linux-style header.
+
+</details>
+
+<details>
+<summary>Packaging files and build commands</summary>
 
 ## Files Required for Packaging
 
@@ -335,8 +479,15 @@ cat "$output_fit" >> "$output_slot"
 
 ```
 
+</details>
+
+<details>
+<summary>Reference projects</summary>
+
 ## Reference Projects
 
 - U-Boot official homepage: <https://u-boot.org/>
 - U-Boot official documentation: <https://docs.u-boot.org/>
 - U-Boot official source repository: <https://source.denx.de/u-boot/u-boot>
+
+</details>
