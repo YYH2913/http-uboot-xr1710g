@@ -30,6 +30,7 @@
 #include <linux/mii.h>
 #include <linux/iopoll.h>
 #include <linux/time.h>
+#include <vsprintf.h>
 #include <asm/arch/scu-regmap.h>
 
 #ifndef MDIO_USXGMII_LINK
@@ -238,6 +239,10 @@
 #define SWITCH_SMACCR1 0x30e8
 #define SMACCR1_MAC0 GENMASK(15, 8)
 #define SMACCR1_MAC1 GENMASK(7, 0)
+#define SWITCH_ATC 0x80
+#define SWITCH_ATC_BUSY BIT(15)
+#define SWITCH_ATC_MAT(x) (((x) & 0xf) << 8)
+#define SWITCH_FDB_FLUSH 2
 #define SWITCH_PHY_POLL 0x7018
 #define SWITCH_PHY_AP_EN GENMASK(30, 24)
 #define SWITCH_EEE_POLL_EN GENMASK(22, 16)
@@ -247,6 +252,12 @@
 #define SWITCH_CPORT_SPTAG_CFG 0x7c10
 #define SWITCH_SW2FE_STAG_EN BIT(1)
 #define SWITCH_FE2SW_STAG_EN BIT(0)
+
+#define AIROHA_RECOVERY_SWITCH_CPU_PORT 6
+#define AIROHA_RECOVERY_LAN_FLAP_MIN_MS 1500
+#define AIROHA_RECOVERY_LAN_UP_SETTLE_MS 700
+#define AIROHA_RECOVERY_SWITCH_DOWN_SETTLE_MS 50
+#define AIROHA_RECOVERY_FDB_MOVE_FLUSH_MS 500
 
 /* FE */
 #define PSE_BASE 0x0100
@@ -654,7 +665,9 @@ struct airoha_eth {
 	struct reset_ctl_bulk xsi_rsts;
 	struct reset_ctl switch_rst;
 	bool has_switch_rst;
-	u8 tx_fport;
+	u8 default_tx_fport;
+	u8 last_tx_fport;
+	u8 last_rx_fport;
 	bool gdm4_pcs_ready;
 	bool gdm4_link_up;
 	bool rtl8261_init_done;
@@ -671,6 +684,17 @@ struct airoha_eth {
 	u16 last_rx_len;
 	u32 last_rx_ctrl;
 	u32 last_rx_msg1;
+	u8 last_rx_head[32];
+	u8 last_rx_head_len;
+	u32 tx_attempts;
+	u32 tx_ok;
+	u32 tx_err;
+	u8 last_tx_dst[ARP_HLEN];
+	u8 last_tx_src[ARP_HLEN];
+	u16 last_tx_ethertype;
+	u16 last_tx_len;
+	u8 last_tx_hw_fport;
+	int last_tx_ret;
 	u8 peer_fport_next;
 	struct airoha_peer_fport peer_fport[AIROHA_PEER_FPORT_CACHE_SIZE];
 
@@ -683,6 +707,37 @@ struct airoha_eth_soc_data {
 	const char *const *xsi_rsts_names;
 	const char *switch_compatible;
 };
+
+static ulong airoha_recovery_lan_activity_ms;
+static ulong airoha_recovery_lan_power_down_ms;
+static ulong airoha_recovery_fdb_flush_ms;
+
+ulong airoha_recovery_get_lan_activity_ms(void)
+{
+	return airoha_recovery_lan_activity_ms;
+}
+
+static void airoha_recovery_note_lan_activity(void)
+{
+	airoha_recovery_lan_activity_ms = get_timer(0);
+}
+
+static void airoha_recovery_copy_head(u8 *dst, u8 *dst_len,
+				      const void *src, int len)
+{
+	int copy_len = len;
+
+	if (copy_len > 32)
+		copy_len = 32;
+	if (copy_len < 0)
+		copy_len = 0;
+
+	if (copy_len)
+		memcpy(dst, src, copy_len);
+	if (copy_len < 32)
+		memset(dst + copy_len, 0, 32 - copy_len);
+	*dst_len = copy_len;
+}
 
 static bool airoha_rtl8261_is_phy_addr(int phy_addr);
 
@@ -698,6 +753,7 @@ enum {
 	FE_PSE_PORT_PPE2,
 	FE_PSE_PORT_GDM4,
 	FE_PSE_PORT_CDM5,
+	FE_PSE_PORT_DROP = 0xf,
 };
 
 enum {
@@ -844,8 +900,10 @@ static void airoha_eth_gdm4_select_speed_mode(struct airoha_eth *eth);
 static void airoha_eth_gdm4_sync_rtl8261(struct airoha_eth *eth);
 static void airoha_eth_gdm4_cdr_reset(struct airoha_eth *eth);
 static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth);
-static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag);
+static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
+				 bool dump_windows);
 static bool airoha_gdm4_loopback_enabled(struct airoha_eth *eth);
+static void airoha_set_xsi_eth_port(struct airoha_eth *eth, bool enable);
 static bool airoha_rtl8261_host_update_enabled(void);
 static int airoha_usxgmii_link_up(struct airoha_eth *eth);
 static int airoha_gdm4_pcs_link_up(struct airoha_eth *eth);
@@ -1394,6 +1452,106 @@ static void airoha_eth_gdm4_pcs_init(struct airoha_eth *eth)
 #define airoha_switch_rmw(eth, offset, mask, val) \
 	airoha_rmw((eth)->switch_regs, (offset), (mask), (val))
 
+static void airoha_switch_fdb_flush(struct airoha_eth *eth)
+{
+	u32 val;
+
+	if (!eth->switch_regs)
+		return;
+
+	airoha_switch_wr(eth, SWITCH_ATC,
+			 SWITCH_ATC_BUSY | SWITCH_ATC_MAT(0) |
+				 SWITCH_FDB_FLUSH);
+	if (read_poll_timeout(airoha_switch_rr, val,
+			      !(val & SWITCH_ATC_BUSY), 20, 20000, eth,
+			      SWITCH_ATC))
+		printf("airoha: switch FDB flush timed out\n");
+}
+
+static void airoha_recovery_flush_fdb_on_port_move(struct airoha_eth *eth,
+						   u8 old_fport, u8 new_fport,
+						   const char *reason)
+{
+	if (!old_fport || !new_fport || old_fport == new_fport)
+		return;
+
+	if (airoha_recovery_fdb_flush_ms &&
+	    get_timer(airoha_recovery_fdb_flush_ms) <
+		    AIROHA_RECOVERY_FDB_MOVE_FLUSH_MS)
+		return;
+
+	printf("airoha: recovery %s moved fport %u->%u, flushing switch FDB\n",
+	       reason, old_fport, new_fport);
+	airoha_switch_fdb_flush(eth);
+	airoha_recovery_fdb_flush_ms = get_timer(0);
+}
+
+static u32 airoha_switch_recovery_pmcr(bool enable)
+{
+	if (!enable)
+		return SWITCH_IPG_CFG_SHORT | SWITCH_MAC_MODE |
+		       SWITCH_FORCE_MODE;
+
+	return SWITCH_IPG_CFG_SHORT | SWITCH_MAC_MODE | SWITCH_FORCE_MODE |
+	       SWITCH_MAC_TX_EN | SWITCH_MAC_RX_EN | SWITCH_BKOFF_EN |
+	       SWITCH_BKPR_EN | SWITCH_FORCE_RX_FC | SWITCH_FORCE_TX_FC |
+	       SWITCH_FORCE_SPD_1000 | SWITCH_FORCE_DPX | SWITCH_FORCE_LNK;
+}
+
+static void airoha_switch_recovery_program_ports(struct airoha_eth *eth,
+						 bool enable)
+{
+	u32 cpu_port_mask = BIT(AIROHA_RECOVERY_SWITCH_CPU_PORT);
+	u32 user_port_mask = GENMASK(5, 0);
+	int port;
+
+	if (!eth->switch_regs)
+		return;
+
+	airoha_switch_wr(eth, SWITCH_PMCR(AIROHA_RECOVERY_SWITCH_CPU_PORT),
+			 airoha_switch_recovery_pmcr(enable));
+	airoha_switch_wr(eth, SWITCH_PMCR(1),
+			 airoha_switch_recovery_pmcr(enable));
+	airoha_switch_wr(eth, SWITCH_PMCR(2),
+			 airoha_switch_recovery_pmcr(enable));
+
+	for (port = 0; port <= AIROHA_RECOVERY_SWITCH_CPU_PORT; port++) {
+		u32 matrix = 0;
+		u32 pvc = FIELD_PREP(SWITCH_STAG_VPID, 0x8100) |
+			  FIELD_PREP(SWITCH_VLAN_ATTR, SWITCH_VLAN_ATTR_USER);
+
+		if (enable)
+			matrix = port == AIROHA_RECOVERY_SWITCH_CPU_PORT ?
+					 user_port_mask :
+					 cpu_port_mask;
+		if (port == AIROHA_RECOVERY_SWITCH_CPU_PORT)
+			pvc |= SWITCH_PORT_SPEC_TAG;
+
+		airoha_switch_rmw(
+			eth, SWITCH_PCR(port),
+			SWITCH_PORT_MATRIX | SWITCH_PORT_VLAN_MASK,
+			FIELD_PREP(SWITCH_PORT_MATRIX, matrix) |
+				FIELD_PREP(SWITCH_PORT_VLAN_MASK,
+					   SWITCH_PORT_FALLBACK_MODE));
+		airoha_switch_rmw(eth, SWITCH_PVC(port),
+				  SWITCH_STAG_VPID | SWITCH_VLAN_ATTR |
+					  SWITCH_PORT_SPEC_TAG,
+				  pvc);
+	}
+}
+
+static void airoha_switch_recovery_quiesce(struct airoha_eth *eth)
+{
+	if (!eth->switch_regs)
+		return;
+
+	airoha_switch_wr(eth, SWITCH_MFC, 0);
+	airoha_switch_rmw(eth, SWITCH_CFC, SWITCH_CPU_PMAP, 0);
+	airoha_switch_recovery_program_ports(eth, false);
+	airoha_switch_fdb_flush(eth);
+	mdelay(AIROHA_RECOVERY_SWITCH_DOWN_SETTLE_MS);
+}
+
 static void airoha_set_gdm_port_fwd_cfg(struct airoha_eth *eth, u32 addr,
 					u32 val)
 {
@@ -1458,7 +1616,16 @@ static bool airoha_recovery_port_is_10g(void)
 {
 	const char *port = env_get("recovery_port");
 
-	return port && !strcmp(port, "10g");
+	return port && (!strcmp(port, "4") || !strcmp(port, "10g") ||
+			!strcmp(port, "lan1"));
+}
+
+static bool airoha_recovery_port_is_1g(void)
+{
+	const char *port = env_get("recovery_port");
+
+	return port && (!strcmp(port, "1") || !strcmp(port, "1g") ||
+			!strcmp(port, "lan2") || !strcmp(port, "lan3"));
 }
 
 static bool airoha_recovery_dual_service_enabled(void)
@@ -1503,10 +1670,32 @@ static u8 airoha_rx_sport_to_fport(u8 sport)
 	return 0;
 }
 
+static u8 airoha_rx_sport_to_recovery_fport(struct airoha_eth *eth, u8 sport)
+{
+	u8 fport = airoha_rx_sport_to_fport(sport);
+
+	if (fport)
+		return fport;
+
+	/*
+	 * The internal switch can report a CPU-facing or otherwise unmapped
+	 * SPORT for lan2/lan3 traffic. Treat unknown recovery RX as 1G unless
+	 * the user explicitly forced the 10G-only port.
+	 */
+	if (airoha_recovery_dual_service_enabled() ||
+	    airoha_recovery_port_is_1g())
+		return 1;
+
+	(void)eth;
+
+	return 0;
+}
+
 static void airoha_peer_fport_learn(struct airoha_eth *eth, const u8 *mac,
 				      u8 fport)
 {
 	int i, slot = -1;
+	u8 old_fport = 0;
 
 	if (!fport || airoha_eth_is_multicast_addr(mac))
 		return;
@@ -1520,9 +1709,13 @@ static void airoha_peer_fport_learn(struct airoha_eth *eth, const u8 *mac,
 
 		if (!memcmp(eth->peer_fport[i].mac, mac, ARP_HLEN)) {
 			slot = i;
+			old_fport = eth->peer_fport[i].fport;
 			break;
 		}
 	}
+
+	airoha_recovery_flush_fdb_on_port_move(eth, old_fport, fport,
+					       "peer");
 
 	if (slot < 0) {
 		slot = eth->peer_fport_next;
@@ -1636,13 +1829,13 @@ static bool airoha_gdm4_loopback_enabled(struct airoha_eth *eth)
 	}
 
 	/*
-	 * The full Linux driver enables the GDM2->GDM4 loopback topology for
-	 * the external serdes netdev, but U-Boot recovery is still a much
-	 * smaller datapath and already receives 10G ingress on the simpler
-	 * CDM1/QDMA0 route. Keep loopback disabled by default and require an
-	 * explicit gdm4_loopback=1 opt-in for experimentation.
+	 * The direct GDM4 TX path can complete QDMA descriptors and increment
+	 * GDM4 counters while the peer still sees no usable frames. Match the
+	 * upstream EN7581 external-serdes topology by default: route GDM2
+	 * loopback into GDM4 and use CDM2/QDMA1 for the 10G CPU path.
+	 * Set gdm4_loopback=0 to force the older direct-GDM4 recovery path.
 	 */
-	return false;
+	return true;
 }
 
 static void airoha_gdm4_update_loopback(struct airoha_eth *eth)
@@ -1684,6 +1877,18 @@ static void airoha_gdm4_update_loopback(struct airoha_eth *eth)
 	}
 }
 
+static void airoha_gdm2_loopback_disable(struct airoha_eth *eth)
+{
+	airoha_fe_wr(eth, REG_GDM_TXCHN_EN(2), 0);
+	airoha_fe_wr(eth, REG_GDM_RXCHN_EN(2), 0);
+	airoha_fe_clear(eth, REG_GDM_LPBK_CFG(2),
+			LPBK_CHAN_MASK | LPBK_MODE_MASK |
+				LBK_GAP_MODE_MASK | LBK_LEN_MODE_MASK |
+				LBK_CHAN_MODE_MASK | LPBK_EN_MASK);
+	airoha_fe_clear(eth, REG_FE_VIP_PORT_EN, BIT(2));
+	airoha_fe_clear(eth, REG_FE_IFC_PORT_EN, BIT(2));
+}
+
 static void airoha_gdm4_update_cpu_path(struct airoha_eth *eth)
 {
 	u32 src_port = HSGMII_LAN_7581_ETH_SRCPORT;
@@ -1697,17 +1902,28 @@ static void airoha_gdm4_update_cpu_path(struct airoha_eth *eth)
 
 	if (loopback) {
 		/*
-		 * Follow the upstream EN7581 GDM4 external-serdes topology:
-		 * GDM2 loopback feeds GDM4, GDM4 ingress still goes through PPE1
-		 * to the active CPU port, while source-port 24 is steered to
-		 * CDM2 for the outbound serdes path.
+		 * Follow the upstream EN7581 GDM4 external-serdes topology.
+		 * When GDM2 loopback is active, GDM4 ingress is handled via
+		 * PPE2 and both the GDM2 loopback port and the GDM4 external
+		 * port need a valid PPE default CPU port. Otherwise RX can
+		 * still show up on the stale PPE1/QDMA0 path after recovery
+		 * restarts, while TX counters keep increasing on GDM4.
 		 *
-		 * GDM4 is FE/PSE port 9, so its PPE default CPU port entry lives
-		 * in the second default-cport register rather than alongside the
-		 * legacy logical port ids.
+		 * GDM4 is FE/PSE port 9, so its PPE default CPU port entry
+		 * lives in the second default-cport register word.
 		 */
 		airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(4),
-					    FE_PSE_PORT_PPE1);
+					    FE_PSE_PORT_PPE2);
+		airoha_fe_rmw(eth,
+			      REG_PPE_DFT_CPORT(0, FE_PSE_PORT_GDM2),
+			      DFT_CPORT_MASK(FE_PSE_PORT_GDM2),
+			      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM2),
+					 sp_cport));
+		airoha_fe_rmw(eth,
+			      REG_PPE_DFT_CPORT(1, FE_PSE_PORT_GDM2),
+			      DFT_CPORT_MASK(FE_PSE_PORT_GDM2),
+			      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM2),
+					 sp_cport));
 		airoha_fe_rmw(eth,
 			      REG_PPE_DFT_CPORT(0, FE_PSE_PORT_GDM4),
 			      DFT_CPORT_MASK(FE_PSE_PORT_GDM4),
@@ -1730,12 +1946,13 @@ static void airoha_gdm4_update_cpu_path(struct airoha_eth *eth)
 	}
 
 	/*
-	 * Bypass PPE entirely for recovery: route GDM4 RX straight to the
-	 * CDM port that feeds the active QDMA instance.  This eliminates any
-	 * PPE back-pressure or mis-routing that can stall gdm4_rx counters.
-	 * PPE DFT_CPORT is still programmed for completeness.
+	 * Keep GDM4 on the same FE topology as the Linux driver and GDM2:
+	 * ingress goes through PPE1, then PPE default-cport steers it to the
+	 * active CDM/QDMA path. Direct GDM4->CDM1 can leave packets counted by
+	 * GDM4 MIBs but not delivered to QDMA after repeated recovery restarts.
 	 */
-	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(4), sp_cport);
+	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(4),
+				    FE_PSE_PORT_PPE1);
 	airoha_fe_rmw(eth, REG_PPE_DFT_CPORT(0, FE_PSE_PORT_GDM4),
 		      DFT_CPORT_MASK(FE_PSE_PORT_GDM4),
 		      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM4), sp_cport));
@@ -1744,6 +1961,119 @@ static void airoha_gdm4_update_cpu_path(struct airoha_eth *eth)
 		      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM4), sp_cport));
 	airoha_fe_rmw(eth, REG_SP_DFT_CPORT(src_port >> 3), src_port_mask,
 		      sp_cport << (src_port_slot << 2));
+}
+
+static void airoha_fe_recovery_runtime_init(struct airoha_eth *eth)
+{
+	u32 src_port = HSGMII_LAN_7581_ETH_SRCPORT;
+
+	if (!eth->fe_regs)
+		return;
+
+	/*
+	 * Re-entering http_recovery should restore the reduced U-Boot datapath
+	 * without rerunning allocation-heavy probe-time setup such as PSE queue
+	 * reservation. Do not assert FE_RST_CORE here: that reset also clears
+	 * PSE state that is only initialized at probe time and breaks both 1G
+	 * and 10G recovery after the first runtime start.
+	 */
+
+	airoha_fe_rmw(eth, REG_PSE_IQ_REV1, PSE_IQ_RES1_P2_MASK,
+		      FIELD_PREP(PSE_IQ_RES1_P2_MASK, 0x10));
+	airoha_fe_rmw(eth, REG_PSE_IQ_REV2,
+		      PSE_IQ_RES2_P5_MASK | PSE_IQ_RES2_P4_MASK,
+		      FIELD_PREP(PSE_IQ_RES2_P5_MASK, 0x40) |
+			      FIELD_PREP(PSE_IQ_RES2_P4_MASK, 0x34));
+	airoha_fe_wr(eth, REG_FE_PCE_CFG,
+		     PCE_DPI_EN_MASK | PCE_KA_EN_MASK | PCE_MC_EN_MASK);
+	airoha_fe_rmw(eth, REG_CDM1_FWD_CFG, CDM1_VIP_QSEL_MASK,
+		      FIELD_PREP(CDM1_VIP_QSEL_MASK, 0x0));
+	airoha_fe_rmw(eth, REG_CDM2_FWD_CFG, CDM2_VIP_QSEL_MASK,
+		      FIELD_PREP(CDM2_VIP_QSEL_MASK, 0x0));
+	airoha_fe_crsn_qsel_init(eth);
+
+	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(1),
+				    FE_PSE_PORT_PPE1);
+	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(2),
+				    FE_PSE_PORT_PPE1);
+	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(4),
+				    FE_PSE_PORT_PPE1);
+	airoha_fe_clear(eth, REG_GDM_INGRESS_CFG(1), GDM_STAG_EN_MASK);
+	airoha_fe_clear(eth, REG_GDM_INGRESS_CFG(2), GDM_STAG_EN_MASK);
+	airoha_fe_clear(eth, REG_GDM_INGRESS_CFG(4), GDM_STAG_EN_MASK);
+	airoha_fe_rmw(eth, REG_GDM_LEN_CFG(1),
+		      GDM_SHORT_LEN_MASK | GDM_LONG_LEN_MASK,
+		      FIELD_PREP(GDM_SHORT_LEN_MASK, 60) |
+			      FIELD_PREP(GDM_LONG_LEN_MASK,
+					 AIROHA_MAX_PACKET_SIZE));
+	airoha_fe_rmw(eth, REG_GDM_LEN_CFG(2),
+		      GDM_SHORT_LEN_MASK | GDM_LONG_LEN_MASK,
+		      FIELD_PREP(GDM_SHORT_LEN_MASK, 60) |
+			      FIELD_PREP(GDM_LONG_LEN_MASK,
+					 AIROHA_MAX_PACKET_SIZE));
+	airoha_fe_rmw(eth, REG_GDM_LEN_CFG(4),
+		      GDM_SHORT_LEN_MASK | GDM_LONG_LEN_MASK,
+		      FIELD_PREP(GDM_SHORT_LEN_MASK, 60) |
+			      FIELD_PREP(GDM_LONG_LEN_MASK,
+					 AIROHA_MAX_PACKET_SIZE));
+
+	airoha_fe_rmw(eth, REG_GDM4_SRC_PORT_SET,
+		      GDM4_SPORT_OFF2_MASK | GDM4_SPORT_OFF1_MASK |
+			      GDM4_SPORT_OFF0_MASK,
+		      FIELD_PREP(GDM4_SPORT_OFF2_MASK, 8) |
+			      FIELD_PREP(GDM4_SPORT_OFF1_MASK, 8) |
+			      FIELD_PREP(GDM4_SPORT_OFF0_MASK, 8));
+	airoha_fe_rmw(eth, REG_GDM4_SRC_PORT_SET_LEGACY,
+		      GDM4_SPORT_OFF2_MASK | GDM4_SPORT_OFF1_MASK |
+			      GDM4_SPORT_OFF0_MASK,
+		      FIELD_PREP(GDM4_SPORT_OFF2_MASK, 8) |
+			      FIELD_PREP(GDM4_SPORT_OFF1_MASK, 8) |
+			      FIELD_PREP(GDM4_SPORT_OFF0_MASK, 8));
+	airoha_fe_rmw(eth, REG_FE_WAN_PORT,
+		      WAN1_EN_MASK | WAN1_MASK | WAN0_MASK,
+		      FIELD_PREP(WAN0_MASK, src_port));
+	airoha_fe_rmw(eth, REG_SRC_PORT_FC_MAP6, FC_ID_OF_SRC_PORT24_MASK,
+		      FIELD_PREP(FC_ID_OF_SRC_PORT24_MASK, 2));
+
+	airoha_set_xsi_eth_port(eth, true);
+	airoha_gdm4_update_cpu_path(eth);
+
+	airoha_fe_rmw(eth, REG_FE_DMA_GLO_CFG,
+		      FE_DMA_GLO_L2_SPACE_MASK | FE_DMA_GLO_PG_SZ_MASK,
+		      FIELD_PREP(FE_DMA_GLO_L2_SPACE_MASK, 2) |
+			      FE_DMA_GLO_PG_SZ_MASK);
+	airoha_fe_wr(eth, REG_FE_CDM1_OQ_MAP0, 0);
+	airoha_fe_wr(eth, REG_FE_CDM1_OQ_MAP1, 0);
+	airoha_fe_wr(eth, REG_FE_CDM1_OQ_MAP2, 0);
+	airoha_fe_wr(eth, REG_FE_CDM1_OQ_MAP3, 0);
+	airoha_fe_set(eth, REG_GDM_MISC_CFG,
+		      GDM2_RDM_ACK_WAIT_PREF_MASK | GDM2_CHN_VLD_MODE_MASK);
+	airoha_fe_rmw(eth, REG_CDM2_FWD_CFG, CDM2_OAM_QSEL_MASK,
+		      FIELD_PREP(CDM2_OAM_QSEL_MASK, 0));
+	airoha_fe_set(eth, REG_GDM3_FWD_CFG, GDM3_PAD_EN_MASK);
+	airoha_fe_set(eth, REG_GDM4_FWD_CFG, GDM4_PAD_EN_MASK);
+	airoha_fe_clear(eth, REG_FE_CPORT_CFG, FE_CPORT_QUEUE_XFC_MASK);
+	airoha_fe_set(eth, REG_FE_CPORT_CFG, FE_CPORT_PORT_XFC_MASK);
+	airoha_fe_rmw(eth, REG_GDM2_CHN_RLS,
+		      MBI_RX_AGE_SEL_MASK | MBI_TX_AGE_SEL_MASK,
+		      FIELD_PREP(MBI_RX_AGE_SEL_MASK, 3) |
+			      FIELD_PREP(MBI_TX_AGE_SEL_MASK, 3));
+	airoha_fe_clear(eth, REG_FE_CSR_IFC_CFG, FE_IFC_EN_MASK);
+}
+
+static void airoha_fe_recovery_runtime_stop(struct airoha_eth *eth)
+{
+	if (!eth->fe_regs)
+		return;
+
+	airoha_set_xsi_eth_port(eth, false);
+	airoha_gdm2_loopback_disable(eth);
+	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(1),
+				    FE_PSE_PORT_DROP);
+	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(2),
+				    FE_PSE_PORT_DROP);
+	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(4),
+				    FE_PSE_PORT_DROP);
 }
 
 static void airoha_set_xsi_eth_port(struct airoha_eth *eth, bool enable)
@@ -1890,6 +2220,94 @@ static int airoha_mdio_c22_read(struct airoha_eth *eth, int addr, int reg)
 					 "airoha,arht-mdio"))
 		dm_mdio_write(mdio_dev, 0, MDIO_DEVAD_NONE, MII_BMSR, 0x1);
 	return dm_mdio_read(mdio_dev, addr, MDIO_DEVAD_NONE, reg);
+}
+
+static bool airoha_recovery_lan_phy_flap_enabled(void)
+{
+	const char *flap = env_get("recovery_lan_flap");
+
+	if (flap && (!strcmp(flap, "0") || !strcmp(flap, "off") ||
+		     !strcmp(flap, "disable") || !strcmp(flap, "false")))
+		return false;
+
+	return true;
+}
+
+static ulong airoha_recovery_env_ulong(const char *name, ulong default_val)
+{
+	const char *value = env_get(name);
+	char *endp;
+	ulong parsed;
+
+	if (!value || !*value)
+		return default_val;
+
+	parsed = simple_strtoul(value, &endp, 0);
+	if (endp == value)
+		return default_val;
+
+	return parsed;
+}
+
+static void airoha_recovery_lan_wait_power_down(void)
+{
+	ulong min_down_ms, elapsed;
+
+	if (!airoha_recovery_lan_power_down_ms)
+		return;
+
+	min_down_ms = airoha_recovery_env_ulong("recovery_lan_flap_ms",
+						AIROHA_RECOVERY_LAN_FLAP_MIN_MS);
+	elapsed = get_timer(airoha_recovery_lan_power_down_ms);
+	if (elapsed < min_down_ms)
+		mdelay(min_down_ms - elapsed);
+}
+
+static bool airoha_recovery_lan_phy_set_power(struct airoha_eth *eth, bool up)
+{
+	static const int lan_phy_addrs[] = { 9, 10 };
+	bool changed = false;
+	int i;
+
+	if (!airoha_recovery_lan_phy_flap_enabled())
+		return false;
+
+	if (up)
+		airoha_recovery_lan_wait_power_down();
+
+	for (i = 0; i < ARRAY_SIZE(lan_phy_addrs); i++) {
+		int phy = lan_phy_addrs[i];
+		int ctrl = airoha_mdio_c22_read(eth, phy, MII_BMCR);
+		u16 new_ctrl;
+
+		if (ctrl < 0)
+			continue;
+
+		if (up)
+			new_ctrl = (ctrl & ~BMCR_PDOWN) | BMCR_ANENABLE |
+				   BMCR_ANRESTART;
+		else
+			new_ctrl = ctrl | BMCR_PDOWN;
+
+		if (new_ctrl == ctrl)
+			continue;
+
+		if (airoha_mdio_c22_write(eth, phy, MII_BMCR, new_ctrl) >= 0)
+			changed = true;
+	}
+
+	if (!changed)
+		return false;
+
+	if (up) {
+		airoha_recovery_lan_power_down_ms = 0;
+		mdelay(airoha_recovery_env_ulong("recovery_lan_up_ms",
+						 AIROHA_RECOVERY_LAN_UP_SETTLE_MS));
+	} else {
+		airoha_recovery_lan_power_down_ms = get_timer(0);
+	}
+
+	return changed;
 }
 
 static int airoha_mdio_c22_mmd_read(struct airoha_eth *eth, int addr, int devad,
@@ -2604,7 +3022,8 @@ static void airoha_qdma_dump_rx_window(const char *tag, int qdma_id,
 	printf("\n");
 }
 
-static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag)
+static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
+				 bool dump_windows)
 {
 	bool link_up = false, full_duplex = false;
 	u32 pcs_sts1 = 0, base_r_sts1 = 0, an_sts0 = 0, an_sts2 = 0;
@@ -2624,6 +3043,9 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag)
 	u32 gdma4_tmbi_frag = 0, gdma4_rmbi_frag = 0;
 	u64 gdm4_tx_ok_pkts = 0, gdm4_tx_eth_pkts = 0, gdm4_rx_ok_pkts = 0;
 	u32 gdm4_tx_drop = 0, gdm4_rx_drop = 0;
+	u32 sw_mfc = 0, sw_cfc = 0, sw_atc = 0;
+	u32 sw_pmcr1 = 0, sw_pmcr2 = 0, sw_pmcr6 = 0;
+	u32 sw_pcr1 = 0, sw_pcr2 = 0, sw_pcr6 = 0;
 	u32 phy5_serdes_cfg = 0;
 	u32 mode = PCS_USXGMII_MODE_10000;
 	u32 rate_adapt = PCS_HSGMII_FORCE_RATE_MODE_10000;
@@ -2631,6 +3053,7 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag)
 	int an = -1, pma = -1, pcs = -1, phyxs = -1;
 	int pma_mgbt = -1, pma_pair = -1, pcs_br1 = -1, pcs_br2 = -1;
 	int an_mgbt_ctrl1 = -1, an_mgbt_stat1 = -1;
+	int phy9_ctrl = -1, phy9_stat = -1, phy10_ctrl = -1, phy10_stat = -1;
 
 	if (!eth)
 		return;
@@ -2720,6 +3143,23 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag)
 		fe_wan_mac_lmin = airoha_fe_rr(eth, REG_FE_MAC_LMIN(REG_FE_WAN_MAC_H));
 	}
 
+	if (eth->switch_regs) {
+		sw_mfc = airoha_switch_rr(eth, SWITCH_MFC);
+		sw_cfc = airoha_switch_rr(eth, SWITCH_CFC);
+		sw_atc = airoha_switch_rr(eth, SWITCH_ATC);
+		sw_pmcr1 = airoha_switch_rr(eth, SWITCH_PMCR(1));
+		sw_pmcr2 = airoha_switch_rr(eth, SWITCH_PMCR(2));
+		sw_pmcr6 = airoha_switch_rr(eth, SWITCH_PMCR(6));
+		sw_pcr1 = airoha_switch_rr(eth, SWITCH_PCR(1));
+		sw_pcr2 = airoha_switch_rr(eth, SWITCH_PCR(2));
+		sw_pcr6 = airoha_switch_rr(eth, SWITCH_PCR(6));
+	}
+
+	phy9_ctrl = airoha_mdio_c22_read(eth, 9, MII_BMCR);
+	phy9_stat = airoha_mdio_c22_read(eth, 9, MII_BMSR);
+	phy10_ctrl = airoha_mdio_c22_read(eth, 10, MII_BMCR);
+	phy10_stat = airoha_mdio_c22_read(eth, 10, MII_BMSR);
+
 	if (eth->eth_pcs_xfi_mac) {
 		xfi_gib_cfg = airoha_rr(eth->eth_pcs_xfi_mac, PCS_XFI_GIB_CFG);
 		xfi_logic_rst = airoha_rr(eth->eth_pcs_xfi_mac, PCS_XFI_LOGIC_RST);
@@ -2789,11 +3229,12 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag)
 	       an_mgbt_stat1, !!(an_mgbt_stat1 & BIT(13)),
 	       !!(an_mgbt_stat1 & BIT(12)), !!(an_mgbt_stat1 & BIT(11)),
 	       !!(an_mgbt_stat1 & BIT(6)), !!(an_mgbt_stat1 & BIT(5)));
-	printf("rtl8261: %s fe route ppe1_dft=%08x ppe2_dft=%08x sport24_map=%08x fc_map6=%08x use_cdm2=%d loopback=%d gdm4_fwd=%08x gdm4_src[new=%08x old=%08x] gdm2[fwd=%08x lpbk=%08x txch=%08x rxch=%08x] last_rx[v=%d qdma=%u sport=0x%x crsn=0x%x ppe=%u len=%u ctrl=%08x msg1=%08x]\n",
+	printf("rtl8261: %s fe route ppe1_dft=%08x ppe2_dft=%08x sport24_map=%08x fc_map6=%08x use_cdm2=%d loopback=%d gdm4_fwd=%08x gdm4_src[new=%08x old=%08x] gdm2[fwd=%08x lpbk=%08x txch=%08x rxch=%08x] fport[def=%u tx=%u rx=%u] last_rx[v=%d qdma=%u sport=0x%x crsn=0x%x ppe=%u len=%u ctrl=%08x msg1=%08x]\n",
 	       tag ? tag : "diag", ppe1_route, ppe2_route, sp_cport, fc_map6,
 	       airoha_gdm4_use_cdm2(eth), airoha_gdm4_loopback_enabled(eth),
 	       gdm4_fwd, gdm4_src, gdm4_src_legacy, gdm2_fwd, gdm2_lpbk,
-	       gdm2_txch, gdm2_rxch, eth->last_rx_valid, eth->last_rx_qdma,
+	       gdm2_txch, gdm2_rxch, eth->default_tx_fport, eth->last_tx_fport,
+	       eth->last_rx_fport, eth->last_rx_valid, eth->last_rx_qdma,
 	       eth->last_rx_sport, eth->last_rx_crsn, eth->last_rx_ppe_entry,
 	       eth->last_rx_len, eth->last_rx_ctrl, eth->last_rx_msg1);
 	printf("rtl8261: %s cnt gdm4_tx_ok=%08x gdm4_rx=%08x/%08x/%08x/%08x qdma0_tx=%08x/%08x qdma0_rx=%08x/%08x qdma1_tx=%08x/%08x qdma1_rx=%08x/%08x\n",
@@ -2807,6 +3248,10 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag)
 	printf("rtl8261: %s mac fe[lan=%08x/%08x wan=%08x/%08x] xfi=%08x/%08x\n",
 	       tag ? tag : "diag", fe_lan_mac_h, fe_lan_mac_lmin,
 	       fe_wan_mac_h, fe_wan_mac_lmin, xfi_mac_h, xfi_mac_l);
+	printf("rtl8261: %s switch mfc=%08x cfc=%08x atc=%08x p1[pcr=%08x pmcr=%08x] p2[pcr=%08x pmcr=%08x] p6[pcr=%08x pmcr=%08x] phy9[ctl=%04x sts=%04x] phy10[ctl=%04x sts=%04x] flap_down=%lu\n",
+	       tag ? tag : "diag", sw_mfc, sw_cfc, sw_atc, sw_pcr1, sw_pmcr1,
+	       sw_pcr2, sw_pmcr2, sw_pcr6, sw_pmcr6, phy9_ctrl, phy9_stat,
+	       phy10_ctrl, phy10_stat, airoha_recovery_lan_power_down_ms);
 	printf("rtl8261: %s xfi gib=%08x rst=%08x\n", tag ? tag : "diag",
 	       xfi_gib_cfg, xfi_logic_rst);
 	printf("rtl8261: %s qdma0 rxring head=%u cpu=%u dma=%u desc[ctrl=%08x addr=%08x msg1=%08x]\n",
@@ -2815,9 +3260,30 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag)
 	printf("rtl8261: %s qdma1 rxring head=%u cpu=%u dma=%u desc[ctrl=%08x addr=%08x msg1=%08x]\n",
 	       tag ? tag : "diag", qdma1_head, qdma1_cpu_idx, qdma1_dma_idx,
 	       qdma1_desc_ctrl, qdma1_desc_addr, qdma1_desc_msg1);
-	if (airoha_qdma_ready(&eth->qdma[0]))
+	printf("rtl8261: %s pkt tx[attempt=%u ok=%u err=%u ret=%d fport=%u hw=%u len=%u type=%04x dst=%pM src=%pM] rx_head[%u]=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+	       tag ? tag : "diag", eth->tx_attempts, eth->tx_ok, eth->tx_err,
+	       eth->last_tx_ret, eth->last_tx_fport, eth->last_tx_hw_fport,
+	       eth->last_tx_len, eth->last_tx_ethertype,
+	       eth->last_tx_dst, eth->last_tx_src, eth->last_rx_head_len,
+	       eth->last_rx_head[0], eth->last_rx_head[1],
+	       eth->last_rx_head[2], eth->last_rx_head[3],
+	       eth->last_rx_head[4], eth->last_rx_head[5],
+	       eth->last_rx_head[6], eth->last_rx_head[7],
+	       eth->last_rx_head[8], eth->last_rx_head[9],
+	       eth->last_rx_head[10], eth->last_rx_head[11],
+	       eth->last_rx_head[12], eth->last_rx_head[13],
+	       eth->last_rx_head[14], eth->last_rx_head[15],
+	       eth->last_rx_head[16], eth->last_rx_head[17],
+	       eth->last_rx_head[18], eth->last_rx_head[19],
+	       eth->last_rx_head[20], eth->last_rx_head[21],
+	       eth->last_rx_head[22], eth->last_rx_head[23],
+	       eth->last_rx_head[24], eth->last_rx_head[25],
+	       eth->last_rx_head[26], eth->last_rx_head[27],
+	       eth->last_rx_head[28], eth->last_rx_head[29],
+	       eth->last_rx_head[30], eth->last_rx_head[31]);
+	if (dump_windows && airoha_qdma_ready(&eth->qdma[0]))
 		airoha_qdma_dump_rx_window(tag, 0, &eth->qdma[0].q_rx[0]);
-	if (airoha_qdma_ready(&eth->qdma[1]))
+	if (dump_windows && airoha_qdma_ready(&eth->qdma[1]))
 		airoha_qdma_dump_rx_window(tag, 1, &eth->qdma[1].q_rx[0]);
 }
 
@@ -3524,7 +3990,7 @@ static int airoha_forced_tx_fport(struct airoha_eth *eth)
 	if (!strcmp(port, "4") || !strcmp(port, "10g") ||
 	    !strcmp(port, "lan1")) {
 		airoha_eth_gdm4_apply_runtime_phy_cfg(eth);
-		need_gdm4_bringup = eth->tx_fport != 4;
+		need_gdm4_bringup = eth->last_tx_fport != 4;
 
 		/*
 		 * Do not restart in-band autonegotiation before every packet.
@@ -3550,6 +4016,12 @@ static int airoha_forced_tx_fport(struct airoha_eth *eth)
 static bool airoha_recovery_lan_up(struct airoha_eth *eth)
 {
 	return airoha_mdio_link_up(eth, 9) || airoha_mdio_link_up(eth, 10);
+}
+
+static void airoha_recovery_set_default_fport(struct airoha_eth *eth, u8 fport)
+{
+	if (fport)
+		eth->default_tx_fport = fport;
 }
 
 static bool airoha_recovery_wan_up(struct airoha_eth *eth)
@@ -3579,6 +4051,23 @@ static void airoha_gdm4_ensure_ready(struct airoha_eth *eth)
 	}
 }
 
+static void airoha_gdm4_recovery_prime(struct airoha_eth *eth)
+{
+	if (!airoha_recovery_accept_gdm4_rx())
+		return;
+
+	if (airoha_recovery_port_is_10g()) {
+		airoha_gdm4_ensure_ready(eth);
+		airoha_recovery_set_default_fport(eth, 4);
+	} else if (airoha_recovery_dual_service_enabled()) {
+		airoha_recovery_set_default_fport(eth, 1);
+		if (airoha_recovery_gdm4_candidate(eth))
+			airoha_gdm4_ensure_ready(eth);
+	}
+
+	airoha_gdm4_update_cpu_path(eth);
+}
+
 static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 {
 	bool lan_up;
@@ -3588,8 +4077,10 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 	bool dual_service;
 
 	forced_fport = airoha_forced_tx_fport(eth);
-	if (forced_fport > 0)
+	if (forced_fport > 0) {
+		airoha_recovery_set_default_fport(eth, forced_fport);
 		return forced_fport;
+	}
 
 	airoha_eth_gdm4_rxlock_workaround(eth);
 
@@ -3607,18 +4098,19 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 	 * individual replies back to 10G based on the peer MAC cache.
 	 */
 	if (lan_up) {
+		airoha_recovery_set_default_fport(eth, 1);
 		if (!dual_service)
 			eth->gdm4_link_up = false;
 		return 1;
 	}
 
-	if (eth->tx_fport == 4 && gdm4_candidate) {
+	if (eth->default_tx_fport == 4 && gdm4_candidate) {
 		if (!dual_service)
 			airoha_gdm4_ensure_ready(eth);
 		return 4;
 	}
 
-	if (eth->tx_fport == 2 && wan_up) {
+	if (eth->default_tx_fport == 2 && wan_up) {
 		if (!dual_service)
 			eth->gdm4_link_up = false;
 		return 2;
@@ -3630,34 +4122,43 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 	 * 1G as the conservative default; replies to confirmed 10G peers still
 	 * use the learned SPORT cache and broadcast frames are mirrored.
 	 */
-	if (dual_service)
+	if (dual_service) {
+		airoha_recovery_set_default_fport(eth, 1);
 		return 1;
+	}
 
 	if (gdm4_candidate) {
 		if (!dual_service)
 			airoha_gdm4_ensure_ready(eth);
+		airoha_recovery_set_default_fport(eth, 4);
 		return 4;
 	}
 
 	eth->gdm4_link_up = false;
 
-	if (wan_up)
+	if (wan_up) {
+		airoha_recovery_set_default_fport(eth, 2);
 		return 2;
+	}
 
-	if (eth->tx_fport == 2 || eth->tx_fport == 4)
-		return eth->tx_fport;
+	if (eth->default_tx_fport == 2 || eth->default_tx_fport == 4)
+		return eth->default_tx_fport;
 
+	airoha_recovery_set_default_fport(eth, 1);
 	return 1;
 }
 
 static u8 airoha_encode_tx_fport(u8 fport)
 {
 	/*
-	 * Linux programs QDMA TXMSG.FPORT with the FE/PSE port id for GDM4,
-	 * not the logical netdev id 4. Keep the recovery policy in logical
-	 * ports and translate only at the QDMA boundary.
+	 * Keep 10G recovery TX on the Linux netdev-style direct GDM4 fport.
+	 * GDM2 loopback remains part of the RX topology, but TX should not
+	 * depend on an environment-controlled comparison path.
 	 */
-	return fport == 4 ? FE_PSE_PORT_GDM4 : fport;
+	if (fport == 4)
+		return FE_PSE_PORT_GDM4;
+
+	return fport;
 }
 
 static u32 airoha_fe_get_pse_queue_rsv_pages(struct airoha_eth *eth, u32 port,
@@ -4257,6 +4758,68 @@ static void airoha_qdma_sync_rx_head(struct airoha_qdma *qdma,
 		q->head = dma_idx;
 }
 
+static void airoha_qdma_stop_dma(struct airoha_qdma *qdma)
+{
+	u32 val;
+
+	airoha_qdma_clear(qdma, REG_QDMA_GLOBAL_CFG,
+			  GLOBAL_CFG_TX_DMA_EN_MASK |
+				  GLOBAL_CFG_RX_DMA_EN_MASK);
+	read_poll_timeout(airoha_qdma_rr, val,
+			  !(val & (GLOBAL_CFG_TX_DMA_BUSY_MASK |
+				   GLOBAL_CFG_RX_DMA_BUSY_MASK)),
+			  10, 1000, qdma, REG_QDMA_GLOBAL_CFG);
+}
+
+static void airoha_qdma_reset_tx_ring(struct airoha_qdma *qdma, int qid)
+{
+	struct airoha_queue *q = &qdma->q_tx[qid];
+
+	if (!q->ndesc || !q->desc)
+		return;
+
+	q->head = 0;
+	memset(q->desc, 0, q->ndesc * sizeof(*q->desc));
+	dma_map_single(q->desc, q->ndesc * sizeof(*q->desc), DMA_TO_DEVICE);
+	airoha_qdma_rmw(qdma, REG_TX_CPU_IDX(qid), TX_RING_CPU_IDX_MASK, 0);
+	airoha_qdma_rmw(qdma, REG_TX_DMA_IDX(qid), TX_RING_DMA_IDX_MASK, 0);
+}
+
+static void airoha_qdma_reset_rx_ring(struct airoha_qdma *qdma, int qid)
+{
+	struct airoha_queue *q = &qdma->q_rx[qid];
+
+	if (!q->ndesc || !q->desc)
+		return;
+
+	q->head = 0;
+	airoha_qdma_init_rx_desc(q);
+	airoha_qdma_rmw(qdma, REG_RX_CPU_IDX(qid), RX_RING_CPU_IDX_MASK,
+			FIELD_PREP(RX_RING_CPU_IDX_MASK, q->ndesc - 1));
+	airoha_qdma_rmw(qdma, REG_RX_DMA_IDX(qid), RX_RING_DMA_IDX_MASK, 0);
+}
+
+static void airoha_qdma_runtime_reset(struct airoha_qdma *qdma)
+{
+	int i;
+
+	airoha_qdma_stop_dma(qdma);
+
+	for (i = 0; i < 2; i++)
+		airoha_qdma_wr(qdma, REG_INT_STATUS(i), 0xffffffff);
+
+	for (i = 0; i < ARRAY_SIZE(qdma->q_tx); i++)
+		airoha_qdma_reset_tx_ring(qdma, i);
+
+	for (i = 0; i < ARRAY_SIZE(qdma->q_rx); i++) {
+		airoha_qdma_reset_rx_ring(qdma, i);
+		airoha_qdma_clear(qdma, REG_RX_DELAY_INT_IDX(i),
+				  RX_DELAY_INT_MASK);
+	}
+
+	airoha_qdma_hw_init(qdma);
+}
+
 static int airoha_qdma_init(struct udevice *dev, struct airoha_eth *eth,
 			    struct airoha_qdma *qdma)
 {
@@ -4286,6 +4849,36 @@ static int airoha_qdma_init(struct udevice *dev, struct airoha_eth *eth,
 	      qdma->q_tx[0].desc, qdma->q_rx[0].desc);
 
 	return airoha_qdma_hw_init(qdma);
+}
+
+static void airoha_recovery_runtime_reset(struct airoha_eth *eth)
+{
+	eth->default_tx_fport = 1;
+	eth->last_tx_fport = 0;
+	eth->last_rx_fport = 0;
+	eth->gdm4_link_up = false;
+	eth->last_rx_valid = false;
+	eth->last_rx_qdma = 0;
+	eth->last_rx_sport = 0;
+	eth->last_rx_crsn = 0;
+	eth->last_rx_index = 0;
+	eth->last_rx_ppe_entry = 0;
+	eth->last_rx_len = 0;
+	eth->last_rx_ctrl = 0;
+	eth->last_rx_msg1 = 0;
+	eth->last_rx_head_len = 0;
+	memset(eth->last_rx_head, 0, sizeof(eth->last_rx_head));
+	eth->tx_attempts = 0;
+	eth->tx_ok = 0;
+	eth->tx_err = 0;
+	memset(eth->last_tx_dst, 0, sizeof(eth->last_tx_dst));
+	memset(eth->last_tx_src, 0, sizeof(eth->last_tx_src));
+	eth->last_tx_ethertype = 0;
+	eth->last_tx_len = 0;
+	eth->last_tx_hw_fport = 0;
+	eth->last_tx_ret = 0;
+	eth->peer_fport_next = 0;
+	memset(eth->peer_fport, 0, sizeof(eth->peer_fport));
 }
 
 static bool airoha_qdma_ready(struct airoha_qdma *qdma)
@@ -4325,11 +4918,18 @@ static struct airoha_qdma *airoha_active_qdma(struct airoha_eth *eth)
 static struct airoha_qdma *airoha_active_tx_qdma(struct airoha_eth *eth, u8 fport)
 {
 	/*
-	 * Keep TX on the same CDM/QDMA path selected for the reduced recovery
-	 * datapath. For XR1710G 10G recovery the default is CDM1/QDMA0 unless
-	 * gdm4_cdm2=1 is explicitly requested.
+	 * Only the external 10G serdes path uses the Linux-like CDM2/QDMA1
+	 * topology. Keep 1G switch traffic on QDMA0 even when GDM4 loopback is
+	 * enabled, otherwise 1G replies can be queued onto the wrong DMA block.
 	 */
-	return airoha_active_qdma(eth);
+	if (fport == 4 && airoha_gdm4_use_cdm2(eth)) {
+		struct airoha_qdma *qdma1 = &eth->qdma[1];
+
+		if (airoha_qdma_ready(qdma1))
+			return qdma1;
+	}
+
+	return &eth->qdma[0];
 }
 
 static u32 airoha_recovery_tx_msg0(int qid)
@@ -4345,12 +4945,12 @@ static u32 airoha_recovery_tx_msg0(int qid)
 static int airoha_recovery_tx_qid(struct airoha_eth *eth, u8 fport)
 {
 	/*
-	 * U-Boot recovery does not replicate Linux netdev queue selection, so
-	 * stay on the conservative queue0 path unless the user explicitly opts
-	 * into the upstream-like CDM2/QDMA1 topology.
+	 * U-Boot recovery does not replicate the Linux QoS scheduler setup.
+	 * Use queue0 for both QDMA instances; the selected QDMA block and
+	 * TXMSG.FPORT decide the recovery egress path.
 	 */
-	if (fport == 4 && airoha_gdm4_use_cdm2(eth))
-		return 7;
+	(void)eth;
+	(void)fport;
 
 	return 0;
 }
@@ -4409,16 +5009,38 @@ static int airoha_hw_init(struct udevice *dev, struct airoha_eth *eth)
 	return 0;
 }
 
+static void airoha_switch_recovery_runtime_init(struct airoha_eth *eth)
+{
+	u32 cpu_port_mask = BIT(AIROHA_RECOVERY_SWITCH_CPU_PORT);
+
+	if (!eth->switch_regs)
+		return;
+
+	/*
+	 * This mirrors the recovery-facing switch setup done at probe time, but
+	 * avoids PHY resets and RTL8261 patching. It makes http_recovery
+	 * re-enterable after eth_halt()/eth_init().
+	 */
+	airoha_switch_wr(eth, SWITCH_MFC,
+			 FIELD_PREP(SWITCH_BC_FFP, cpu_port_mask) |
+				 FIELD_PREP(SWITCH_UNM_FFP, cpu_port_mask) |
+				 FIELD_PREP(SWITCH_UNU_FFP, cpu_port_mask));
+	airoha_switch_rmw(eth, SWITCH_CFC, SWITCH_CPU_PMAP,
+			  FIELD_PREP(SWITCH_CPU_PMAP, cpu_port_mask));
+	airoha_switch_rmw(eth, SWITCH_AGC, 0, SWITCH_LOCAL_EN);
+	airoha_switch_wr(eth, SWITCH_CPORT_SPTAG_CFG,
+			 SWITCH_SW2FE_STAG_EN | SWITCH_FE2SW_STAG_EN);
+
+	airoha_switch_recovery_program_ports(eth, true);
+	airoha_switch_fdb_flush(eth);
+}
+
 static int airoha_switch_init(struct udevice *dev, struct airoha_eth *eth)
 {
 	struct airoha_eth_soc_data *data = (void *)dev_get_driver_data(dev);
 	ofnode mdio_node, switch_node;
 	u32 phy_poll_start, phy_poll_end;
-	u32 cpu_port_mask = BIT(6);
-	u32 user_port_mask = GENMASK(5, 0);
-	u32 switch_pmcr;
 	fdt_addr_t addr;
-	int port;
 
 	switch_node =
 		ofnode_by_compatible(ofnode_null(), data->switch_compatible);
@@ -4432,63 +5054,7 @@ static int airoha_switch_init(struct udevice *dev, struct airoha_eth *eth)
 	/* Switch doesn't have a DEV, gets address and setup Flood and CPU port */
 	eth->switch_regs = map_sysmem(addr, 0);
 
-	/*
-	 * Forward unknown/broadcast traffic to the CPU port only. Without
-	 * this, recovery packets may get trapped inside the switch fabric.
-	 */
-	airoha_switch_wr(eth, SWITCH_MFC,
-			 FIELD_PREP(SWITCH_BC_FFP, cpu_port_mask) |
-				 FIELD_PREP(SWITCH_UNM_FFP, cpu_port_mask) |
-				 FIELD_PREP(SWITCH_UNU_FFP, cpu_port_mask));
-
-	/* Treat port 6 as the dedicated CPU port. */
-	airoha_switch_rmw(eth, SWITCH_CFC, SWITCH_CPU_PMAP,
-			  FIELD_PREP(SWITCH_CPU_PMAP, cpu_port_mask));
-	airoha_switch_rmw(eth, SWITCH_AGC, 0, SWITCH_LOCAL_EN);
-	airoha_switch_wr(eth, SWITCH_CPORT_SPTAG_CFG,
-			 SWITCH_SW2FE_STAG_EN | SWITCH_FE2SW_STAG_EN);
-
-	switch_pmcr = SWITCH_IPG_CFG_SHORT | SWITCH_MAC_MODE |
-		      SWITCH_FORCE_MODE | SWITCH_MAC_TX_EN | SWITCH_MAC_RX_EN |
-		      SWITCH_BKOFF_EN | SWITCH_BKPR_EN | SWITCH_FORCE_RX_FC |
-		      SWITCH_FORCE_TX_FC | SWITCH_FORCE_SPD_1000 |
-		      SWITCH_FORCE_DPX | SWITCH_FORCE_LNK;
-
-	/* Set CPU 6 PMCR */
-	airoha_switch_wr(eth, SWITCH_PMCR(6), switch_pmcr);
-
-	/*
-	 * XR1710G recovery traffic uses the internal switch user ports that map
-	 * to lan2/lan3. The stock reset state leaves their MACs partially
-	 * disabled; force them up so broadcast ARP can actually egress.
-	 */
-	airoha_switch_wr(eth, SWITCH_PMCR(1), switch_pmcr);
-	airoha_switch_wr(eth, SWITCH_PMCR(2), switch_pmcr);
-
-	/*
-	 * Match Linux switch setup: user ports only talk to the CPU port,
-	 * while the CPU port can reach all user ports. The switch-specific
-	 * tag stays in the DMA metadata rather than the frame payload.
-	 */
-	for (port = 0; port <= 6; port++) {
-		u32 matrix = port == 6 ? user_port_mask : cpu_port_mask;
-		u32 pvc = FIELD_PREP(SWITCH_STAG_VPID, 0x8100) |
-			  FIELD_PREP(SWITCH_VLAN_ATTR, SWITCH_VLAN_ATTR_USER);
-
-		if (port == 6)
-			pvc |= SWITCH_PORT_SPEC_TAG;
-
-		airoha_switch_rmw(
-			eth, SWITCH_PCR(port),
-			SWITCH_PORT_MATRIX | SWITCH_PORT_VLAN_MASK,
-			FIELD_PREP(SWITCH_PORT_MATRIX, matrix) |
-				FIELD_PREP(SWITCH_PORT_VLAN_MASK,
-					   SWITCH_PORT_FALLBACK_MODE));
-		airoha_switch_rmw(eth, SWITCH_PVC(port),
-				  SWITCH_STAG_VPID | SWITCH_VLAN_ATTR |
-					  SWITCH_PORT_SPEC_TAG,
-				  pvc);
-	}
+	airoha_switch_recovery_runtime_init(eth);
 
 	phy_poll_start = ofnode_read_u32_default(switch_node,
 						 "airoha,phy-poll-start", 0x8);
@@ -4548,7 +5114,10 @@ static int airoha_eth_probe(struct udevice *dev)
 		return PTR_ERR(chip_scu_regmap);
 	eth->chip_scu_regmap = chip_scu_regmap;
 
-	eth->tx_fport = 1;
+	eth->default_tx_fport = 1;
+	eth->last_tx_fport = 0;
+	eth->last_tx_hw_fport = 0;
+	eth->last_rx_fport = 0;
 
 	/* It seems by default the FEMEM_SEL is set to Memory (0x1)
 	 * preventing any access to any QDMA and FrameEngine register
@@ -4632,19 +5201,15 @@ static int airoha_eth_init(struct udevice *dev)
 	struct airoha_eth *eth = dev_get_priv(dev);
 	int i, qid;
 
+	airoha_recovery_runtime_reset(eth);
+	airoha_switch_recovery_quiesce(eth);
+	airoha_recovery_lan_phy_set_power(eth, false);
+	airoha_fe_recovery_runtime_init(eth);
 	arht_eth_write_hwaddr(dev);
-	airoha_gdm4_update_cpu_path(eth);
-	eth->last_rx_valid = false;
-	eth->last_rx_qdma = 0;
-	eth->last_rx_sport = 0;
-	eth->last_rx_crsn = 0;
-	eth->last_rx_index = 0;
-	eth->last_rx_ppe_entry = 0;
-	eth->last_rx_len = 0;
-	eth->last_rx_ctrl = 0;
-	eth->last_rx_msg1 = 0;
-	eth->peer_fport_next = 0;
-	memset(eth->peer_fport, 0, sizeof(eth->peer_fport));
+	airoha_recovery_lan_phy_set_power(eth, true);
+	airoha_switch_recovery_runtime_init(eth);
+	airoha_switch_fdb_flush(eth);
+	airoha_gdm4_recovery_prime(eth);
 	qid = 0;
 
 	for (i = 0; i < AIROHA_MAX_NUM_QDMA; i++) {
@@ -4654,11 +5219,8 @@ static int airoha_eth_init(struct udevice *dev)
 		if (!airoha_qdma_ready(qdma))
 			continue;
 
+		airoha_qdma_runtime_reset(qdma);
 		q = &qdma->q_rx[qid];
-		q->head = 0;
-		airoha_qdma_init_rx_desc(q);
-		airoha_qdma_rmw(qdma, REG_RX_CPU_IDX(qid), RX_RING_CPU_IDX_MASK,
-				FIELD_PREP(RX_RING_CPU_IDX_MASK, q->ndesc - 1));
 		airoha_qdma_set(qdma, REG_QDMA_GLOBAL_CFG,
 				GLOBAL_CFG_TX_DMA_EN_MASK |
 				GLOBAL_CFG_RX_DMA_EN_MASK);
@@ -4686,10 +5248,13 @@ static void airoha_eth_stop(struct udevice *dev)
 		if (!airoha_qdma_ready(qdma))
 			continue;
 
-		airoha_qdma_clear(qdma, REG_QDMA_GLOBAL_CFG,
-				  GLOBAL_CFG_TX_DMA_EN_MASK |
-					  GLOBAL_CFG_RX_DMA_EN_MASK);
+		airoha_qdma_stop_dma(qdma);
 	}
+
+	airoha_switch_recovery_quiesce(eth);
+	airoha_fe_recovery_runtime_stop(eth);
+	airoha_recovery_lan_phy_set_power(eth, false);
+	airoha_recovery_runtime_reset(eth);
 }
 
 static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
@@ -4723,10 +5288,21 @@ static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 
 	dma_addr = dma_map_single(tx_packet, tx_length, DMA_TO_DEVICE);
 
-	if (fport == 4 && airoha_recovery_dual_service_enabled())
-		airoha_gdm4_ensure_ready(eth);
+	eth->last_tx_fport = fport;
+	eth->last_tx_len = tx_length;
+	eth->last_tx_ret = -EINPROGRESS;
+	eth->last_tx_hw_fport = airoha_encode_tx_fport(fport);
+	eth->tx_attempts++;
+	if (tx_length >= ETH_HLEN) {
+		const u8 *eth_hdr = tx_packet;
 
-	eth->tx_fport = fport;
+		memcpy(eth->last_tx_dst, eth_hdr, ARP_HLEN);
+		memcpy(eth->last_tx_src, eth_hdr + ARP_HLEN, ARP_HLEN);
+		eth->last_tx_ethertype =
+			((u16)eth_hdr[12] << 8) | eth_hdr[13];
+	}
+	if (fport == 1)
+		airoha_recovery_note_lan_activity();
 	arht_eth_write_hwaddr(dev);
 	airoha_gdm4_update_cpu_path(eth);
 	qdma = airoha_active_tx_qdma(eth, fport);
@@ -4738,7 +5314,7 @@ static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 
 	msg0 = airoha_recovery_tx_msg0(qid);
 	msg1 = FIELD_PREP(QDMA_ETH_TXMSG_FPORT_MASK,
-			  airoha_encode_tx_fport(fport)) |
+			  eth->last_tx_hw_fport) |
 	       FIELD_PREP(QDMA_ETH_TXMSG_METER_MASK, 0x7f);
 
 	val = FIELD_PREP(QDMA_DESC_LEN_MASK, tx_length);
@@ -4765,11 +5341,17 @@ static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 	}
 
 	/* Return error if for some reason the descriptor never ACK */
-	if (!(desc->ctrl & QDMA_DESC_DONE_MASK))
+	if (!(desc->ctrl & QDMA_DESC_DONE_MASK)) {
+		eth->last_tx_ret = -EAGAIN;
+		eth->tx_err++;
 		return -EAGAIN;
+	}
 
 	q->head = index;
 	airoha_qdma_rmw(qdma, REG_IRQ_CLEAR_LEN(0), IRQ_CLEAR_LEN_MASK, 1);
+
+	eth->last_tx_ret = 0;
+	eth->tx_ok++;
 
 	return 0;
 }
@@ -4786,12 +5368,12 @@ static u8 airoha_pick_packet_tx_fport(struct airoha_eth *eth,
 		return 0;
 
 	fport = airoha_peer_fport_lookup(eth, packet);
-	if (fport == 1 && !airoha_recovery_lan_up(eth))
+	if (fport == 4) {
+		if (airoha_recovery_accept_gdm4_rx()) {
+			airoha_gdm4_ensure_ready(eth);
+			return 4;
+		}
 		fport = 0;
-	else if (fport == 4) {
-		airoha_eth_gdm4_rxlock_workaround(eth);
-		if (!airoha_recovery_gdm4_candidate(eth))
-			fport = 0;
 	}
 
 	if (fport)
@@ -4820,10 +5402,13 @@ static int airoha_eth_send(struct udevice *dev, void *packet, int length)
 		/*
 		 * Link detection on the 1G switch ports can miss a live cable.
 		 * Mirroring broadcasts to fport 1 is cheap and is required for
-		 * ARP/TFTP discovery when 10G is also linked.
+		 * ARP/TFTP discovery. Send 10G broadcasts speculatively because
+		 * the GDM4/USXGMII link status can lag behind usable RX.
 		 */
 		send_lan = true;
-		send_10g = airoha_recovery_gdm4_candidate(eth);
+		send_10g = airoha_recovery_accept_gdm4_rx();
+		if (send_10g && airoha_recovery_gdm4_candidate(eth))
+			airoha_gdm4_ensure_ready(eth);
 
 		if (send_lan) {
 			attempts++;
@@ -4893,6 +5478,7 @@ static int airoha_eth_recv_qdma(struct airoha_eth *eth, struct airoha_qdma *qdma
 	u32 desc_ctrl, msg1;
 	u8 qdma_id = qdma - &eth->qdma[0];
 	u8 sport, crsn;
+	u8 old_rx_fport;
 	u16 ppe_entry, length;
 	uchar *packet;
 	int qid;
@@ -4938,9 +5524,14 @@ static int airoha_eth_recv_qdma(struct airoha_eth *eth, struct airoha_qdma *qdma
 	 * EN7581 reports GDM4 traffic as SPORT 0x18 in RX metadata,
 	 * while GDM2 still comes back as SPORT 0x2.
 	 */
-	eth->tx_fport = airoha_rx_sport_to_fport(sport);
-	if (!eth->tx_fport)
-		eth->tx_fport = airoha_pick_tx_fport(eth);
+	old_rx_fport = eth->last_rx_fport;
+	eth->last_rx_fport = airoha_rx_sport_to_recovery_fport(eth, sport);
+	airoha_recovery_flush_fdb_on_port_move(eth, old_rx_fport,
+					       eth->last_rx_fport, "rx");
+	if (!eth->last_rx_fport)
+		airoha_pick_tx_fport(eth);
+	else if (eth->last_rx_fport == 1)
+		airoha_recovery_note_lan_activity();
 	airoha_gdm4_update_cpu_path(eth);
 
 	eth->last_rx_valid = true;
@@ -4954,9 +5545,11 @@ static int airoha_eth_recv_qdma(struct airoha_eth *eth, struct airoha_qdma *qdma
 	eth->last_rx_msg1 = msg1;
 
 	packet = q->rx_buf + (q->head * AIROHA_RX_BUF_SIZE);
+	airoha_recovery_copy_head(eth->last_rx_head, &eth->last_rx_head_len,
+				  packet, length);
 	if (length >= 12)
 		airoha_peer_fport_learn(eth, packet + ARP_HLEN,
-					 airoha_rx_sport_to_fport(sport));
+					 eth->last_rx_fport);
 
 	/*
 	 * The Linux driver does not discard RX frames solely due to
@@ -5154,7 +5747,7 @@ static int do_rtl8261_diag(struct cmd_tbl *cmdtp, int flag, int argc,
 		return CMD_RET_FAILURE;
 	}
 
-	airoha_eth_gdm4_diag(eth, "cmd");
+	airoha_eth_gdm4_diag(eth, "cmd", true);
 
 	return 0;
 }
