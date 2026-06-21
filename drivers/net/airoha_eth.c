@@ -3624,6 +3624,15 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 		return 2;
 	}
 
+	/*
+	 * The switch PHY link bits for lan2/lan3 are not a reliable gate on
+	 * XR1710G after the upstream DM/DT merge. In dual-service mode keep
+	 * 1G as the conservative default; replies to confirmed 10G peers still
+	 * use the learned SPORT cache and broadcast frames are mirrored.
+	 */
+	if (dual_service)
+		return 1;
+
 	if (gdm4_candidate) {
 		if (!dual_service)
 			airoha_gdm4_ensure_ready(eth);
@@ -4808,7 +4817,12 @@ static int airoha_eth_send(struct udevice *dev, void *packet, int length)
 	if (airoha_eth_is_broadcast_addr(packet) ||
 	    airoha_eth_is_multicast_addr(packet)) {
 		airoha_eth_gdm4_rxlock_workaround(eth);
-		send_lan = airoha_recovery_lan_up(eth);
+		/*
+		 * Link detection on the 1G switch ports can miss a live cable.
+		 * Mirroring broadcasts to fport 1 is cheap and is required for
+		 * ARP/TFTP discovery when 10G is also linked.
+		 */
+		send_lan = true;
 		send_10g = airoha_recovery_gdm4_candidate(eth);
 
 		if (send_lan) {
