@@ -29,6 +29,9 @@
 #include <lwip/ip.h>
 #include <lwip/timeouts.h>
 #include <lwip/udp.h>
+#include <lwip/tcp.h>
+#include <lwip/etharp.h>
+#include <lwip/priv/tcp_priv.h>
 #include <lwip/apps/httpd.h>
 #include <lwip/apps/fs.h>
 #include <lwip/prot/dhcp.h>
@@ -46,6 +49,7 @@
 DECLARE_GLOBAL_DATA_PTR;
 
 int xr1710g_sync_factory(void);
+ulong airoha_recovery_get_lan_activity_ms(void);
 
 /*
  * Upload buffer
@@ -69,6 +73,8 @@ int xr1710g_sync_factory(void);
 #define RECOVERY_DHCP_MAX_MSG_LEN        1500
 #define RECOVERY_LED_PORTS     2
 #define RECOVERY_LED_POLL_MS   100
+#define RECOVERY_LED_ACTIVITY_MS 350
+#define RECOVERY_LED_BLINK_MS  100
 #define RECOVERY_STATUS_LED_MAX           8
 #define RECOVERY_STATUS_PWM_PERIOD_MS     20
 #define RECOVERY_STATUS_BREATHE_PERIOD_MS 1800
@@ -102,6 +108,8 @@ int xr1710g_sync_factory(void);
 #define RECOVERY_FACTORY_SIZE  (1 * 1024 * 1024UL)
 #define RECOVERY_UBI_WRITE_CHUNK (1024 * 1024U)
 #define RECOVERY_UBOOT_SLOT_FIT_OFFSET 0x2100U
+#define RECOVERY_UBOOT_SLOT_DEFAULT_OFS 0x600000UL
+#define RECOVERY_UBOOT_SLOT_DEFAULT_DEV "spi-nand0"
 #define RECOVERY_IH_MAGIC 0x27051956U
 #define RECOVERY_FDT_MAGIC 0xd00dfeedU
 
@@ -123,6 +131,30 @@ static volatile int prog_phase; /* 0 idle, 1 erase, 2 write, 3 done, -1 error */
 static unsigned long long prog_erase_volume_base;
 static unsigned long long prog_erase_volume_bytes;
 static struct recovery_status_led_ctrl *prog_status_leds;
+static bool recovery_httpd_started;
+
+static void recovery_abort_tcp_list(struct tcp_pcb **list)
+{
+	while (*list)
+		tcp_abort(*list);
+}
+
+static void recovery_close_tcp_listeners(void)
+{
+	while (tcp_listen_pcbs.pcbs)
+		tcp_close(tcp_listen_pcbs.pcbs);
+}
+
+static void recovery_lwip_cleanup(struct netif *netif)
+{
+	recovery_close_tcp_listeners();
+	recovery_abort_tcp_list(&tcp_active_pcbs);
+	recovery_abort_tcp_list(&tcp_tw_pcbs);
+	recovery_abort_tcp_list(&tcp_bound_pcbs);
+	if (netif)
+		etharp_cleanup_netif(netif);
+	recovery_httpd_started = false;
+}
 
 static void post_delay_cb(void *arg)
 {
@@ -301,6 +333,19 @@ static void recovery_gpio_set_value(u8 gpio, bool active_low, int active)
 static void recovery_led_set_pin(u8 gpio, int on)
 {
 	recovery_gpio_set_value(gpio, true, on);
+}
+
+static void recovery_led_stop(struct recovery_led_ctrl *ctrl)
+{
+	int i;
+
+	if (!ctrl)
+		return;
+
+	for (i = 0; i < RECOVERY_LED_PORTS; i++) {
+		recovery_led_set_pin(recovery_green_led_gpios[i], 0);
+		recovery_led_set_pin(recovery_yellow_led_gpios[i], 0);
+	}
 }
 
 static void recovery_status_led_set(const struct recovery_gpio_pin *pin, int on)
@@ -1032,7 +1077,10 @@ static int recovery_led_phy_speed(struct recovery_led_ctrl *ctrl, int idx)
 
 static void recovery_led_poll(struct recovery_led_ctrl *ctrl)
 {
+	ulong activity_ms;
 	ulong now;
+	bool activity;
+	bool blink_on;
 	int i, speed;
 
 	now = get_timer(0);
@@ -1040,13 +1088,18 @@ static void recovery_led_poll(struct recovery_led_ctrl *ctrl)
 		return;
 
 	ctrl->last_poll = now;
+	activity_ms = airoha_recovery_get_lan_activity_ms();
+	activity = activity_ms && now - activity_ms <= RECOVERY_LED_ACTIVITY_MS;
+	blink_on = !activity ||
+		   ((now / RECOVERY_LED_BLINK_MS) & 1);
 
 	for (i = 0; i < RECOVERY_LED_PORTS; i++) {
 		speed = recovery_led_phy_speed(ctrl, i);
 		recovery_led_set_pin(recovery_green_led_gpios[i],
-				     speed == SPEED_1000);
+				     speed == SPEED_1000 && blink_on);
 		recovery_led_set_pin(recovery_yellow_led_gpios[i],
-				     speed == SPEED_10 || speed == SPEED_100);
+				     (speed == SPEED_10 || speed == SPEED_100) &&
+					     blink_on);
 	}
 }
 
@@ -1104,10 +1157,33 @@ static ulong recovery_raw_offset(enum upload_target tgt)
 	case TARGET_FIRMWARE:
 		return env_get_hex("recovery_ofs", 0x050000);
 	case TARGET_UBOOT:
-		return env_get_hex("uboot_ofs", 0x0);
+		return env_get_hex("uboot_ofs",
+				   RECOVERY_UBOOT_SLOT_DEFAULT_OFS);
 	}
 
 	return 0;
+}
+
+static const char *recovery_default_raw(enum upload_target tgt)
+{
+	switch (tgt) {
+	case TARGET_UBOOT:
+		return RECOVERY_UBOOT_SLOT_DEFAULT_DEV;
+	case TARGET_FIRMWARE:
+	default:
+		return NULL;
+	}
+}
+
+static unsigned long recovery_target_size_cap(enum upload_target tgt)
+{
+	ulong size_cap = env_get_hex(recovery_size_env(tgt), 0);
+
+	if (tgt == TARGET_UBOOT &&
+	    (!size_cap || size_cap > RECOVERY_MAX_UBOOT_SIZE))
+		size_cap = RECOVERY_MAX_UBOOT_SIZE;
+
+	return size_cap;
 }
 
 static const char *recovery_ubi_part(enum upload_target tgt)
@@ -1209,10 +1285,12 @@ static int recovery_resolve_target(enum upload_target tgt,
 	mtd_probe_devices();
 
 	raw = env_get(recovery_raw_env(tgt));
+	if (!raw || !*raw)
+		raw = recovery_default_raw(tgt);
 	if (raw && *raw) {
 		mtd = get_mtd_device_nm(raw);
 		if (!IS_ERR_OR_NULL(mtd)) {
-			ulong size_cap = env_get_hex(recovery_size_env(tgt), 0);
+			ulong size_cap = recovery_target_size_cap(tgt);
 
 			ofs = recovery_raw_offset(tgt);
 			target->backend = RECOVERY_BACKEND_MTD;
@@ -1228,6 +1306,16 @@ static int recovery_resolve_target(enum upload_target tgt,
 			return 0;
 		}
 	}
+
+	/*
+	 * The XR1710G U-Boot upload target is the raw chainloader slot. Do
+	 * not silently fall back to an MTD/UBI volume named "uboot"; old saved
+	 * environments may lack recovery_dev_uboot, and writing there makes the
+	 * browser report success while the first-stage loader still reads stale
+	 * or invalid bytes from 0x600000/0x602100.
+	 */
+	if (tgt == TARGET_UBOOT)
+		return -ENODEV;
 
 	mtd = get_mtd_device_nm(name);
 	if (!IS_ERR_OR_NULL(mtd)) {
@@ -1268,7 +1356,7 @@ static int recovery_resolve_target(enum upload_target tgt,
 	if (ofs && target->limit > ofs)
 		target->limit -= ofs;
 	{
-		ulong size_cap = env_get_hex(recovery_size_env(tgt), 0);
+		ulong size_cap = recovery_target_size_cap(tgt);
 
 		if (size_cap && target->limit > size_cap)
 			target->limit = size_cap;
@@ -2466,15 +2554,17 @@ int run_http_recovery(void)
 	} else {
 		printf("Recovery status LEDs unavailable (%d), fallback to link LEDs\n",
 		       rc);
-		recovery_led_init(&leds);
 	}
+	recovery_led_init(&leds);
 	recovery_prepare_static_network();
 
 	rc = net_lwip_eth_start();
 	if (rc < 0) {
 		printf("Failed to start Ethernet: %d\n", rc);
+		recovery_lwip_cleanup(NULL);
 		recovery_status_led_stop(&status_leds);
 		recovery_status_led_release(&status_leds);
+		recovery_led_stop(&leds);
 		recovery_led_ctrl_free(&leds);
 		return rc;
 	}
@@ -2482,8 +2572,10 @@ int run_http_recovery(void)
 	udev = eth_get_dev();
 	if (!udev) {
 		printf("No active net device\n");
+		recovery_lwip_cleanup(NULL);
 		recovery_status_led_stop(&status_leds);
 		recovery_status_led_release(&status_leds);
+		recovery_led_stop(&leds);
 		recovery_led_ctrl_free(&leds);
 		eth_halt();
 		return -ENODEV;
@@ -2491,8 +2583,10 @@ int run_http_recovery(void)
 
 	netif = net_lwip_new_netif(udev);
 	if (!netif) {
+		recovery_lwip_cleanup(NULL);
 		recovery_status_led_stop(&status_leds);
 		recovery_status_led_release(&status_leds);
+		recovery_led_stop(&leds);
 		recovery_led_ctrl_free(&leds);
 		eth_halt();
 		return -ENODEV;
@@ -2504,7 +2598,10 @@ int run_http_recovery(void)
 	else
 		net_lwip_set_recovery_dhcp_hook(recovery_dhcp_recv, &dhcp);
 
-	httpd_init();
+	if (!recovery_httpd_started) {
+		httpd_init();
+		recovery_httpd_started = true;
+	}
 	printf("HTTP recovery server listening on http://%s/\n",
 	       ip4addr_ntoa(netif_ip4_addr(netif)));
 
@@ -2521,8 +2618,7 @@ int run_http_recovery(void)
 		net_lwip_rx(udev, netif);
 		if (use_status_leds)
 			recovery_status_led_poll(&status_leds);
-		else
-			recovery_led_poll(&leds);
+		recovery_led_poll(&leds);
 		if (flash_request) {
 			flash_request = 0;
 			printf("Upload done, flashing...\n");
@@ -2544,10 +2640,12 @@ int run_http_recovery(void)
 
 	recovery_dhcp_server_stop(&dhcp);
 	net_lwip_set_recovery_dhcp_hook(NULL, NULL);
+	recovery_lwip_cleanup(netif);
 	net_lwip_remove_netif(netif);
 	eth_halt();
 	recovery_status_led_stop(&status_leds);
 	recovery_status_led_release(&status_leds);
+	recovery_led_stop(&leds);
 	recovery_led_ctrl_free(&leds);
 	return 0;
 }
