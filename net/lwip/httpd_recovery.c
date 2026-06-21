@@ -101,6 +101,9 @@ int xr1710g_sync_factory(void);
 #define RECOVERY_UBOOTENV_SIZE (1 * 1024 * 1024UL)
 #define RECOVERY_FACTORY_SIZE  (1 * 1024 * 1024UL)
 #define RECOVERY_UBI_WRITE_CHUNK (1024 * 1024U)
+#define RECOVERY_UBOOT_SLOT_FIT_OFFSET 0x2100U
+#define RECOVERY_IH_MAGIC 0x27051956U
+#define RECOVERY_FDT_MAGIC 0xd00dfeedU
 
 static u8 *recv_base;
 static u32 recv_off;
@@ -138,6 +141,14 @@ static void recovery_prepare_static_network(void)
 	env_set("ipaddr", RECOVERY_STATIC_IPADDR);
 	env_set("netmask", RECOVERY_STATIC_NETMASK);
 	env_set("gatewayip", RECOVERY_STATIC_GATEWAY);
+}
+
+static u32 recovery_be32_to_cpu(const void *p)
+{
+	const u8 *b = p;
+
+	return ((u32)b[0] << 24) | ((u32)b[1] << 16) |
+	       ((u32)b[2] << 8) | b[3];
 }
 
 enum upload_target {
@@ -1286,6 +1297,32 @@ static void recovery_service_runtime(struct recovery_status_led_ctrl *status_led
 	WATCHDOG_RESET();
 }
 
+static int recovery_validate_uboot_slot_image(const void *image, size_t size)
+{
+	const u8 *p = image;
+	u32 prefix_magic;
+	u32 fit_magic;
+
+	if (size <= RECOVERY_UBOOT_SLOT_FIT_OFFSET + sizeof(u32)) {
+		printf("U-Boot slot image is too small: %lu bytes\n",
+		       (unsigned long)size);
+		return -EINVAL;
+	}
+
+	prefix_magic = recovery_be32_to_cpu(p);
+	fit_magic = recovery_be32_to_cpu(p + RECOVERY_UBOOT_SLOT_FIT_OFFSET);
+
+	if (prefix_magic != RECOVERY_IH_MAGIC ||
+	    fit_magic != RECOVERY_FDT_MAGIC) {
+		printf("Invalid U-Boot slot image: magic[0]=0x%08x magic[0x%04x]=0x%08x\n",
+		       prefix_magic, RECOVERY_UBOOT_SLOT_FIT_OFFSET, fit_magic);
+		printf("Expected xr1710g-chainloader-slot.bin, not u-boot.bin or bare .itb\n");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static void recovery_ubi_progress(struct ubi_volume *vol, int done, int total)
 {
 	unsigned long long bytes_done = prog_erase_volume_base;
@@ -2227,6 +2264,14 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		printf("No data received to flash\n");
 		prog_phase = -1;
 		return -EINVAL;
+	}
+
+	if (current_target == TARGET_UBOOT) {
+		ret = recovery_validate_uboot_slot_image(recv_base, recv_off);
+		if (ret) {
+			prog_phase = -1;
+			return ret;
+		}
 	}
 
 	ret = recovery_resolve_target(current_target, &target);

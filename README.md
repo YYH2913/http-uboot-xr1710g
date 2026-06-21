@@ -93,6 +93,10 @@ setenv bootcmd 'flash read 0x602100 0x4000000 $loadaddr; bootm'
 saveenv
 ```
 
+The current slot image is dual-entry. The ECNT stock command above enters the
+FIT at `0x602100`; older environments that read from `0x600000` and run
+no-argument `bootm` enter a small legacy prefix shim instead.
+
 RAM-only TFTP validation with the slot image:
 
 ```sh
@@ -127,6 +131,13 @@ Use one of these compatible forms:
 
 ```sh
 setenv bootcmd 'flash read 0x602100 0x100000 $loadaddr; bootm 0x81800000'
+saveenv
+```
+
+or:
+
+```sh
+setenv bootcmd 'flash read 0x600000 0x100000 $loadaddr; bootm'
 saveenv
 ```
 
@@ -188,9 +199,13 @@ kernel_filename=tclinux.bin
 uboot_filename=tcboot.bin
 ```
 
-For this stock environment, keep the default `bootcmd` unchanged. The packaged
-slot image keeps the vendor `0x2100`-byte slot prefix, so the FIT image starts
-at flash offset `0x602100`. That matches the ECNT default command:
+For this stock environment, keep the default `bootcmd` unchanged. The current
+slot image is dual-entry:
+
+- flash offset `0x600000` contains a small legacy bootm prefix shim
+- flash offset `0x602100` contains the full chainloader FIT
+
+The ECNT default command enters the FIT directly:
 
 ```sh
 flash read 0x602100 0x4000000 $loadaddr
@@ -232,24 +247,39 @@ The image to write is still:
 out/xr1710g-chainloader-slot.bin
 ```
 
-Do not replace the ECNT default with the older `0x600000` no-argument form:
+The older `0x600000` no-argument form is also supported by the current
+dual-entry slot image:
 
 ```sh
 flash read 0x600000 0x100000 $loadaddr
 bootm
 ```
 
-That older form reads the vendor slot prefix into `$loadaddr`, so no-argument
-`bootm` does not start at the FIT header.
+In this mode, `bootm` starts the legacy prefix shim at `$loadaddr`; that shim
+then locates the FIT at `$loadaddr + 0x2100` and jumps to the embedded
+second-stage U-Boot payload.
 
 After flashing the slot image, the ECNT prompt can be used to validate the
 first-stage handoff manually:
 
 ```sh
 printenv ver version vendor board bootcmd loadaddr fdt_high
+flash read 0x600000 0x100 0x81800000
+md.b 0x81800000 0x20
 flash read 0x602100 0x4000000 $loadaddr
 bootm
 ```
+
+The expected magic bytes for a correctly flashed current slot image are:
+
+- at flash offset `0x600000`: `27 05 19 56` (`IH_MAGIC`, legacy prefix shim)
+- at flash offset `0x602100`: `d0 0d fe ed` (`FDT_MAGIC`, chainloader FIT)
+
+If `bootcmd=flash read 0x602100 ...; bootm` prints `Wrong Image Format`, the
+first thing to check is the second magic value above. If `0x602100` is not
+`d0 0d fe ed`, the ECNT environment is not the cause; the chainloader slot was
+not written with the current `out/xr1710g-chainloader-slot.bin`, or it was
+written at the wrong offset.
 
 If variable expansion is inconvenient, use the default address explicitly:
 
@@ -291,9 +321,11 @@ bootcmd=flash read 0x600000 0x100000 $loadaddr; bootm
 That command matched the older `openwrt-airoha-an7581-gemtek_w1700k-ubi-chainload-uboot.itb`
 flow where the FIT image started directly at `0x600000`.
 
-The current `xr1710g-chainloader-slot.bin` keeps the vendor `0x2100`-byte slot
-prefix, so the FIT starts at `0x602100` instead. Because of that, the old
-no-argument `bootm` form is not compatible with the current slot image.
+Older single-entry `xr1710g-chainloader-slot.bin` builds kept a vendor
+`0x2100`-byte slot prefix and placed the FIT at `0x602100`, so the old
+no-argument `bootm` form was not compatible. Current builds are dual-entry:
+the slot starts with a legacy bootm prefix shim and still keeps the FIT at
+`0x602100`.
 
 Before expecting automatic boot to work, inspect the current setting in the
 first-stage prompt:
@@ -304,6 +336,13 @@ printenv bootcmd
 
 The following first-stage forms are confirmed to work with the current
 `xr1710g-chainloader-slot.bin`:
+
+```sh
+flash read 0x600000 0x100000 0x81800000
+bootm 0x81800000
+```
+
+or:
 
 ```sh
 flash read 0x602100 0x100000 0x81800000
@@ -317,15 +356,15 @@ flash read 0x600000 0x100000 0x81800000
 bootm 0x81802100
 ```
 
-The following old form is not compatible with the current slot image:
-
-```sh
-flash read 0x600000 0x100000 $loadaddr
-bootm
-```
-
 To update the persistent first-stage environment, use one of these `bootcmd`
 values:
+
+```sh
+setenv bootcmd 'flash read 0x600000 0x100000 $loadaddr; bootm'
+saveenv
+```
+
+or:
 
 ```sh
 setenv bootcmd 'flash read 0x602100 0x100000 $loadaddr; bootm 0x81800000'
@@ -433,7 +472,9 @@ To package the raw U-Boot payload into a flashable chainloader image, prepare:
 
 - Raw secondary payload: `u-boot.bin`
 - Vendor slot image, for example `mtd5_tclinux.bin`
-  Used to preserve the first `0x2100` bytes of the original vendor image
+  Used as a reference input when building the slot image
+- Prefix shim: `chainloader-prefix-shim.uImage`
+  Provides compatibility with legacy `flash read 0x600000 ...; bootm`
 - Shim: `chainloader-shim.bin`
 - Control DTB: `chainloader-control.dtb`
 - `u-boot/tools/mkimage`
@@ -451,6 +492,7 @@ Reference: simplified `build-chainloader-fit.sh` script contents, keeping only t
 set -eu
 
 stock_slot=xr1710g-backup/mtd5_tclinux.bin
+prefix_shim=out/chainloader-prefix-shim.uImage
 shim=out/chainloader-shim.bin
 payload=out/u-boot.bin
 dtb=out/chainloader-control.dtb
@@ -472,9 +514,11 @@ sed \
 "$mkimage" -f "$its" "$output_fit"
 "$dumpimage" -l "$output_fit"
 
-# Preserve the first 0x2100 bytes of the original vendor tclinux slot,
-# then append the new FIT image
-head -c $((0x2100)) "$stock_slot" > "$output_slot"
+# Place a legacy bootm prefix shim at slot offset 0, pad it to 0x2100 bytes,
+# then append the full chainloader FIT image.
+prefix_size=$(wc -c < "$prefix_shim")
+cp "$prefix_shim" "$output_slot"
+dd if=/dev/zero bs=1 count=$((0x2100 - prefix_size)) >> "$output_slot" 2>/dev/null
 cat "$output_fit" >> "$output_slot"
 
 ```
