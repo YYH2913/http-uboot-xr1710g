@@ -286,6 +286,10 @@ static int xr1710g_create_ubi_volume(const char *name, size_t size)
 	req.bytes = size;
 	req.vol_type = UBI_STATIC_VOLUME;
 	req.name_len = strlen(name);
+	if (req.name_len > UBI_VOL_NAME_MAX) {
+		ubi_put_device(ubi);
+		return -ENAMETOOLONG;
+	}
 	memcpy(req.name, name, req.name_len);
 	req.name[req.name_len] = '\0';
 

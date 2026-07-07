@@ -9,6 +9,7 @@
 #include <env.h>
 #include <log.h>
 #include <malloc.h>
+#include <memalign.h>
 #include <command.h>
 #include <mtd.h>
 #include <net-lwip.h>
@@ -117,7 +118,6 @@ static u8 *recv_base;
 static u32 recv_off;
 static u32 recv_total;
 static int post_ok;
-static int upload_done;
 static int flash_request;
 static volatile int reboot_request;
 /* Progress for /status polling */
@@ -166,6 +166,14 @@ static void reboot_delay_cb(void *arg)
 {
     (void)arg;
     reboot_request = 1;
+}
+
+static void recovery_cancel_timeouts(void)
+{
+	sys_untimeout(post_delay_cb, NULL);
+	sys_untimeout(reboot_delay_cb, NULL);
+	flash_request = 0;
+	reboot_request = 0;
 }
 
 static void recovery_prepare_static_network(void)
@@ -1411,6 +1419,82 @@ static int recovery_validate_uboot_slot_image(const void *image, size_t size)
 	return 0;
 }
 
+static bool recovery_mtd_is_block_aligned(struct mtd_info *mtd, u64 value)
+{
+	return mtd->erasesize && !(value % mtd->erasesize);
+}
+
+static int recovery_mtd_validate_region(struct mtd_info *mtd, loff_t ofs,
+					size_t len)
+{
+	if (!mtd || !mtd->erasesize)
+		return -EINVAL;
+
+	if (!len)
+		return 0;
+
+	if (ofs < 0 || ofs >= mtd->size ||
+	    (u64)len > (u64)(mtd->size - ofs)) {
+		printf("MTD region 0x%llx..+0x%lx is outside '%s' size 0x%llx\n",
+		       (unsigned long long)ofs, (unsigned long)len,
+		       mtd->name, (unsigned long long)mtd->size);
+		return -EINVAL;
+	}
+
+	if (!recovery_mtd_is_block_aligned(mtd, ofs) ||
+	    !recovery_mtd_is_block_aligned(mtd, len)) {
+		printf("MTD region 0x%llx..+0x%lx is not eraseblock aligned (0x%x)\n",
+		       (unsigned long long)ofs, (unsigned long)len,
+		       mtd->erasesize);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static void recovery_update_erase_progress(loff_t done)
+{
+	prog_erase_done = done > prog_erase_total ? prog_erase_total : done;
+	prog_done = prog_erase_done + prog_write_done;
+}
+
+static int recovery_mtd_mark_bad(struct mtd_info *mtd, loff_t addr)
+{
+	int ret;
+
+	ret = mtd_block_markbad(mtd, addr);
+	if (ret)
+		printf("Warning: failed to mark bad block at 0x%llx on '%s': %d\n",
+		       (unsigned long long)addr, mtd->name, ret);
+	else
+		printf("Marked bad block at 0x%llx on '%s'\n",
+		       (unsigned long long)addr, mtd->name);
+
+	return ret;
+}
+
+static int recovery_mtd_verify_write(struct mtd_info *mtd, loff_t addr,
+				     const u8 *src, size_t len, u8 *buf)
+{
+	size_t retlen = 0;
+	int ret;
+
+	ret = mtd_read(mtd, addr, len, &retlen, buf);
+	if ((ret && ret != -EUCLEAN) || retlen != len) {
+		printf("mtd_read verify failed: ret=%d retlen=%lu at 0x%llx\n",
+		       ret, (unsigned long)retlen, (unsigned long long)addr);
+		return ret ? ret : -EIO;
+	}
+
+	if (memcmp(buf, src, len)) {
+		printf("mtd_read verify mismatch at 0x%llx\n",
+		       (unsigned long long)addr);
+		return -EIO;
+	}
+
+	return 0;
+}
+
 static void recovery_ubi_progress(struct ubi_volume *vol, int done, int total)
 {
 	unsigned long long bytes_done = prog_erase_volume_base;
@@ -1436,15 +1520,17 @@ static int recovery_erase_mtd_region(struct mtd_info *mtd, loff_t ofs,
 				     struct recovery_status_led_ctrl *status_leds)
 {
 	struct erase_info ei = { 0 };
-	loff_t erase_len;
 	int ret;
 
 	if (!mtd || !len)
 		return 0;
 
-	erase_len = ALIGN(len, mtd->erasesize);
+	ret = recovery_mtd_validate_region(mtd, ofs, len);
+	if (ret)
+		return ret;
+
 	ei.addr = ofs;
-	ei.len = erase_len;
+	ei.len = len;
 
 	ret = mtd_unlock(mtd, ei.addr, ei.len);
 	if (ret && ret != -EOPNOTSUPP) {
@@ -1453,12 +1539,26 @@ static int recovery_erase_mtd_region(struct mtd_info *mtd, loff_t ofs,
 		       (unsigned long long)ei.len, ret);
 	}
 
-	for (loff_t addr = 0; addr < erase_len; addr += mtd->erasesize) {
+	for (loff_t addr = 0; addr < len; addr += mtd->erasesize) {
 		struct erase_info e = {
 			.addr = ofs + addr,
 			.len = mtd->erasesize,
 		};
 		int tries = 0;
+
+		ret = mtd_block_isbad(mtd, e.addr);
+		if (ret < 0) {
+			printf("Failed to query bad block at 0x%llx: %d\n",
+			       (unsigned long long)e.addr, ret);
+			return ret;
+		}
+		if (ret > 0) {
+			printf("Skipping bad block at 0x%llx\n",
+			       (unsigned long long)e.addr);
+			recovery_update_erase_progress(addr + mtd->erasesize);
+			recovery_service_runtime(status_leds);
+			continue;
+		}
 
 		do {
 			ret = mtd_erase(mtd, &e);
@@ -1470,17 +1570,106 @@ static int recovery_erase_mtd_region(struct mtd_info *mtd, loff_t ofs,
 				break;
 		} while (++tries < 2);
 
-		if (ret)
-			return ret;
+		if (ret) {
+			printf("mtd_erase failed at 0x%llx: %d\n",
+			       (unsigned long long)e.addr, ret);
+			if (recovery_mtd_mark_bad(mtd, e.addr))
+				return ret;
+		}
 
-		prog_erase_done = addr + mtd->erasesize;
-		if (prog_erase_done > prog_erase_total)
-			prog_erase_done = prog_erase_total;
-		prog_done = prog_erase_done + prog_write_done;
+		recovery_update_erase_progress(addr + mtd->erasesize);
 		recovery_service_runtime(status_leds);
 	}
 
 	return 0;
+}
+
+static int recovery_write_mtd_region(struct mtd_info *mtd, loff_t ofs,
+				     size_t region_len, const void *image,
+				     size_t image_size, bool verify,
+				     struct recovery_status_led_ctrl *status_leds)
+{
+	const u8 *src = image;
+	u8 *verify_buf = NULL;
+	u32 written = 0;
+	int ret;
+
+	if (!image_size)
+		return 0;
+
+	ret = recovery_mtd_validate_region(mtd, ofs, region_len);
+	if (ret)
+		return ret;
+
+	if (verify) {
+		verify_buf = malloc_cache_aligned(mtd->erasesize);
+		if (!verify_buf)
+			return -ENOMEM;
+	}
+
+	for (loff_t addr = ofs; addr < ofs + region_len && written < image_size;
+	     addr += mtd->erasesize) {
+		size_t chunk = min((size_t)mtd->erasesize,
+				   image_size - (size_t)written);
+		size_t retlen = 0;
+
+		ret = mtd_block_isbad(mtd, addr);
+		if (ret < 0) {
+			printf("Failed to query bad block at 0x%llx: %d\n",
+			       (unsigned long long)addr, ret);
+			goto out;
+		}
+		if (ret > 0) {
+			printf("Skipping bad block at 0x%llx\n",
+			       (unsigned long long)addr);
+			recovery_service_runtime(status_leds);
+			continue;
+		}
+
+		ret = mtd_write(mtd, addr, chunk, &retlen, src + written);
+		if (ret || retlen != chunk) {
+			printf("mtd_write failed: ret=%d retlen=%lu at 0x%llx\n",
+			       ret, (unsigned long)retlen,
+			       (unsigned long long)addr);
+			if (recovery_mtd_mark_bad(mtd, addr)) {
+				if (!ret)
+					ret = -EIO;
+				goto out;
+			}
+			recovery_service_runtime(status_leds);
+			continue;
+		}
+
+		if (verify_buf) {
+			ret = recovery_mtd_verify_write(mtd, addr,
+							src + written, chunk,
+							verify_buf);
+			if (ret) {
+				if (recovery_mtd_mark_bad(mtd, addr))
+					goto out;
+				recovery_service_runtime(status_leds);
+				continue;
+			}
+		}
+
+		written += chunk;
+		prog_write_done = written;
+		prog_done = prog_erase_done + prog_write_done;
+		recovery_service_runtime(status_leds);
+	}
+
+	if (written < image_size) {
+		printf("Not enough good eraseblocks in MTD target: wrote %u/%lu bytes\n",
+		       written, (unsigned long)image_size);
+		ret = -ENOSPC;
+		goto out;
+	}
+
+	ret = 0;
+
+out:
+	free(verify_buf);
+	return ret;
 }
 
 static bool recovery_preserve_ubi_volume(const char *name)
@@ -1847,6 +2036,21 @@ static int recovery_cleanup_ubi_firmware(struct recovery_target *target,
 #endif
 }
 
+static void recovery_abort_ubi_update(struct ubi_volume *vol)
+{
+	if (!vol || !vol->updating)
+		return;
+
+	if (vol->upd_buf) {
+		vfree(vol->upd_buf);
+		vol->upd_buf = NULL;
+	}
+	vol->updating = 0;
+	vol->upd_bytes = 0;
+	vol->upd_received = 0;
+	vol->upd_ebs = 0;
+}
+
 static int recovery_write_ubi_target(struct recovery_target *target,
 				      struct recovery_status_led_ctrl *status_leds,
 				      const void *image, size_t image_size)
@@ -1922,6 +2126,8 @@ static int recovery_write_ubi_target(struct recovery_target *target,
 	ret = 0;
 
 out_close:
+	if (ret)
+		recovery_abort_ubi_update(vol);
 	ubi_close_volume(desc);
 	return ret;
 #else
@@ -2042,6 +2248,54 @@ static unsigned long recovery_calc_target_max(enum upload_target tgt,
 
 /* Only dynamic endpoints here; static files come from fsdata */
 
+static const char recovery_page_ok[] =
+	"HTTP/1.0 200 OK\r\n"
+	"Content-Type: text/plain\r\n"
+	"Cache-Control: no-store\r\n"
+	"Content-Length: 2\r\n"
+	"Connection: close\r\n"
+	"\r\n"
+	"OK";
+
+static int recovery_open_custom_response(struct fs_file *file,
+					 const char *content_type,
+					 const char *body, int body_len)
+{
+	char header[160];
+	char *page;
+	int header_len;
+	int total_len;
+
+	if (body_len < 0)
+		return 0;
+
+	header_len = snprintf(header, sizeof(header),
+			      "HTTP/1.0 200 OK\r\n"
+			      "Content-Type: %s\r\n"
+			      "Cache-Control: no-store\r\n"
+			      "Content-Length: %d\r\n"
+			      "Connection: close\r\n"
+			      "\r\n",
+			      content_type, body_len);
+	if (header_len < 0 || header_len >= (int)sizeof(header))
+		return 0;
+
+	total_len = header_len + body_len;
+	page = malloc(total_len + 1);
+	if (!page)
+		return 0;
+
+	memcpy(page, header, header_len);
+	memcpy(page + header_len, body, body_len);
+	page[total_len] = '\0';
+
+	file->data = page;
+	file->len = total_len;
+	file->index = 0;
+	file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+	return 1;
+}
+
 /* lwIP httpd custom file hooks: serve only dynamic endpoints; static files via fsdata */
 int fs_open_custom(struct fs_file *file, const char *name)
 {
@@ -2056,7 +2310,6 @@ int fs_open_custom(struct fs_file *file, const char *name)
 
 
 	    if (!strcmp(p, "status")) {
-        static char page_status[512];
         char json[256];
         int ok = (prog_phase == 3);
         int err = (prog_phase == -1);
@@ -2072,44 +2325,17 @@ int fs_open_custom(struct fs_file *file, const char *name)
         if (json_len >= (int)sizeof(json))
             json_len = (int)sizeof(json) - 1;
 
-        /* Build header with Content-Length for robustness */
-        int hdr_len = snprintf(page_status, sizeof(page_status),
-                               "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-                               json_len);
-        if (hdr_len < 0)
-            return 0;
-        if ((size_t)hdr_len >= sizeof(page_status))
-            hdr_len = sizeof(page_status) - 1;
-        /* Append body */
-        size_t space = sizeof(page_status) - hdr_len - 1;
-        size_t body_len = (json_len > (int)space) ? space : (size_t)json_len;
-        memcpy(page_status + hdr_len, json, body_len);
-        page_status[hdr_len + body_len] = '\0';
-
-        file->data = page_status;
-        file->len = hdr_len + body_len; /* actual header + body written */
-        file->index = 0;
-	        file->flags = FS_FILE_FLAGS_HEADER_INCLUDED; /* header already included */
-	        return 1;
+        return recovery_open_custom_response(file, "application/json",
+					     json, json_len);
 	    }
 	    else if (!strcmp(p, "ok")) {
-	        static const char page_ok[] =
-	            "HTTP/1.0 200 OK\r\n"
-	            "Content-Type: text/plain\r\n"
-	            "Cache-Control: no-store\r\n"
-	            "Content-Length: 2\r\n"
-	            "Connection: close\r\n"
-	            "\r\n"
-	            "OK";
-
-	        file->data = page_ok;
-	        file->len = sizeof(page_ok) - 1;
+	        file->data = recovery_page_ok;
+	        file->len = sizeof(recovery_page_ok) - 1;
 	        file->index = 0;
 	        file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
 	        return 1;
 	    }
 	    else if (!strcmp(p, "about")) {
-        static char page_about[384];
         char json[256];
         int json_len =
 #ifdef U_BOOT_DATE
@@ -2126,23 +2352,8 @@ int fs_open_custom(struct fs_file *file, const char *name)
         if (json_len >= (int)sizeof(json))
             json_len = (int)sizeof(json) - 1;
 
-        int hdr_len = snprintf(page_about, sizeof(page_about),
-                               "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-                               json_len);
-        if (hdr_len < 0)
-            return 0;
-        if ((size_t)hdr_len >= sizeof(page_about))
-            hdr_len = sizeof(page_about) - 1;
-        size_t space = sizeof(page_about) - hdr_len - 1;
-        size_t body_len = (json_len > (int)space) ? space : (size_t)json_len;
-        memcpy(page_about + hdr_len, json, body_len);
-        page_about[hdr_len + body_len] = '\0';
-
-        file->data = page_about;
-        file->len = hdr_len + body_len;
-        file->index = 0;
-        file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
-        return 1;
+        return recovery_open_custom_response(file, "application/json",
+					     json, json_len);
     }
     /* Do not intercept favicon/index/ok/fail: served by fsdata */
     /* let fsdata handle others */
@@ -2151,7 +2362,10 @@ int fs_open_custom(struct fs_file *file, const char *name)
 
 void fs_close_custom(struct fs_file *file)
 {
-    (void)file;
+	if (file && file->data && file->data != recovery_page_ok) {
+		free((void *)file->data);
+		file->data = NULL;
+	}
 }
 
 int fs_read_custom(struct fs_file *file, char *buffer, int count)
@@ -2185,8 +2399,14 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
     if (post_auto_wnd)
         *post_auto_wnd = 0;
 
+    if (post_ok || flash_request || reboot_request || prog_phase > 0) {
+        printf("httpd: rejecting upload while recovery flash is busy (phase=%d)\n",
+               prog_phase);
+        strlcpy(response_uri, "/fail.html", response_uri_len);
+        return ERR_ARG;
+    }
+
     post_ok = 0;
-    upload_done = 0;
     recv_off = 0;
     recv_total = 0;
     /* Reset progress state. */
@@ -2265,13 +2485,13 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
             base = CONFIG_SYS_LOAD_ADDR;
 
         /* Keep the buffer inside usable RAM. */
-        if (base < ram_start || (base + recv_total) > ram_end) {
+        if (base < ram_start || base >= ram_end ||
+            recv_total > (ram_end - base)) {
             ulong fallback = ram_start + 0x01000000UL;
-            if ((fallback >= ram_start) && ((fallback + recv_total) <= ram_end))
+            if (fallback >= ram_start && fallback < ram_end &&
+                recv_total <= (ram_end - fallback)) {
                 base = fallback;
-            else if ((ram_end - recv_total) > ram_start)
-                base = ram_end - recv_total;
-            else {
+            } else {
                 prog_phase = -1;
                 printf("httpd: no sufficient RAM for upload (%u bytes)\n", recv_total);
                 strlcpy(response_uri, "/fail.html", response_uri_len);
@@ -2312,10 +2532,6 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p)
     recved = p->tot_len;
     pbuf_free(p);
 
-    if (recv_off >= recv_total) {
-        upload_done = 1;
-    }
-
 #if LWIP_HTTPD_POST_MANUAL_WND
     if (recved)
         httpd_post_data_recved(connection, recved);
@@ -2345,17 +2561,20 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
 static int flash_image(struct recovery_status_led_ctrl *status_leds)
 {
 	struct recovery_target target;
-	size_t retlen;
+	const u8 *image = recv_base;
+	u32 image_size = recv_off;
 	int ret;
 
-	if (!recv_off) {
+	post_ok = 0;
+
+	if (!image_size) {
 		printf("No data received to flash\n");
 		prog_phase = -1;
 		return -EINVAL;
 	}
 
 	if (current_target == TARGET_UBOOT) {
-		ret = recovery_validate_uboot_slot_image(recv_base, recv_off);
+		ret = recovery_validate_uboot_slot_image(image, image_size);
 		if (ret) {
 			prog_phase = -1;
 			return ret;
@@ -2373,9 +2592,9 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	    target.backend == RECOVERY_BACKEND_UBI)
 		target.limit = recovery_calc_forced_ubi_limit(&target);
 
-	if (recv_off > target.limit) {
+	if (image_size > target.limit) {
 		printf("Image size %u exceeds target size %llu\n",
-		       recv_off, target.limit);
+		       image_size, target.limit);
 		recovery_release_target(&target);
 		prog_phase = -1;
 		return -EFBIG;
@@ -2387,7 +2606,7 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		if (current_force_recreate && current_target == TARGET_FIRMWARE)
 			printf("Force recreate requested: removing non-preserved UBI volumes before flashing.\n");
 
-		ret = recovery_prepare_ubi_target(&target, status_leds, recv_off,
+		ret = recovery_prepare_ubi_target(&target, status_leds, image_size,
 						      &reformatted);
 		if (ret) {
 			printf("Failed to prepare UBI target '%s' on '%s': %d\n",
@@ -2399,7 +2618,7 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 
 		if (!reformatted) {
 			ret = recovery_cleanup_ubi_firmware(&target, status_leds,
-							    recv_off);
+							    image_size);
 			if (ret) {
 				printf("Failed to clean UBI firmware volumes for '%s': %d\n",
 				       target.name, ret);
@@ -2411,21 +2630,23 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 
 		if (!target.cur_size) {
 			printf("Creating missing UBI volume '%s' for %u bytes...\n",
-			       target.name, recv_off);
-			ret = recovery_create_ubi_target(&target, recv_off);
+			       target.name, image_size);
+			ret = recovery_create_ubi_target(&target, image_size);
 			if (ret) {
 				printf("ubi_create_volume failed for '%s': %d\n",
 				       target.name, ret);
+				recovery_release_target(&target);
 				prog_phase = -1;
 				return ret;
 			}
-		} else if (recv_off > target.cur_size) {
+		} else if (image_size > target.cur_size) {
 			printf("Resizing UBI volume '%s' from %llu to fit %u bytes...\n",
-			       target.name, target.cur_size, recv_off);
-			ret = recovery_resize_ubi_target(&target, recv_off);
+			       target.name, target.cur_size, image_size);
+			ret = recovery_resize_ubi_target(&target, image_size);
 			if (ret) {
 				printf("ubi_resize_volume failed for '%s': %d\n",
 				       target.name, ret);
+				recovery_release_target(&target);
 				prog_phase = -1;
 				return ret;
 			}
@@ -2445,24 +2666,24 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 			return ret;
 		}
 
-			printf("Writing %u bytes to UBI volume '%s' on '%s'...\n",
-			       recv_off, target.name, target.ubi_part);
-			prog_phase = 2;
-			prog_done = prog_erase_total;
-			prog_write_done = 0;
-			recovery_service_runtime(status_leds);
-			ret = recovery_write_ubi_target(&target, status_leds,
-							recv_base, recv_off);
-			if (ret) {
-				printf("UBI write failed for '%s': %d\n",
-				       target.name, ret);
-				recovery_release_target(&target);
-				prog_phase = -1;
+		printf("Writing %u bytes to UBI volume '%s' on '%s'...\n",
+		       image_size, target.name, target.ubi_part);
+		prog_phase = 2;
+		prog_done = prog_erase_total;
+		prog_write_done = 0;
+		recovery_service_runtime(status_leds);
+		ret = recovery_write_ubi_target(&target, status_leds,
+						image, image_size);
+		if (ret) {
+			printf("UBI write failed for '%s': %d\n",
+			       target.name, ret);
+			recovery_release_target(&target);
+			prog_phase = -1;
 			return ret;
 		}
 
-		prog_write_done = recv_off;
-		prog_done = prog_erase_total + recv_off;
+		prog_write_done = image_size;
+		prog_done = prog_erase_total + image_size;
 		recovery_release_target(&target);
 		prog_phase = 3;
 		if (current_target == TARGET_FIRMWARE)
@@ -2474,18 +2695,18 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	{
 		struct mtd_info *mtd = target.mtd;
 		loff_t ofs = target.ofs;
-		loff_t erase_len = ALIGN(target.limit, mtd->erasesize);
+		loff_t erase_len = target.limit;
 
 		prog_phase = 1;
 		prog_done = 0;
 		prog_erase_done = 0;
 		prog_erase_total = erase_len;
 		prog_write_done = 0;
-		prog_write_total = recv_off;
+		prog_write_total = image_size;
 		prog_total = prog_erase_total + prog_write_total;
 
 		printf("Erasing entire target '%s' (%llu bytes) and writing %u bytes...\n",
-		       target.name, (unsigned long long)target.limit, recv_off);
+		       target.name, (unsigned long long)target.limit, image_size);
 		ret = recovery_erase_mtd_region(mtd, ofs, target.limit,
 						status_leds);
 		if (ret) {
@@ -2496,31 +2717,15 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		}
 
 		prog_phase = 2;
-		for (u32 written = 0; written < recv_off; ) {
-			u32 remain = recv_off - written;
-			u32 chunk = remain > (64 * 1024) ? (64 * 1024) : remain;
-
-			ret = mtd_write(mtd, ofs + written, chunk, &retlen,
-					recv_base + written);
-			if (ret) {
-				printf("mtd_write failed: ret=%d at 0x%llx\n",
-				       ret, (unsigned long long)(ofs + written));
-				recovery_release_target(&target);
-				prog_phase = -1;
-				return ret;
-			}
-			if (!retlen) {
-				printf("mtd_write made no progress at 0x%llx\n",
-				       (unsigned long long)(ofs + written));
-				recovery_release_target(&target);
-				prog_phase = -1;
-				return -EIO;
-			}
-
-			written += retlen;
-			prog_write_done = written;
-			prog_done = prog_erase_done + prog_write_done;
-			recovery_service_runtime(status_leds);
+		ret = recovery_write_mtd_region(mtd, ofs, target.limit, image,
+						image_size,
+						current_target == TARGET_UBOOT,
+						status_leds);
+		if (ret) {
+			printf("mtd_write failed: %d\n", ret);
+			recovery_release_target(&target);
+			prog_phase = -1;
+			return ret;
 		}
 	}
 
@@ -2542,11 +2747,19 @@ int run_http_recovery(void)
 	bool use_status_leds = false;
 	int rc;
 
+	recovery_cancel_timeouts();
 	recv_off = recv_total = 0;
 	post_ok = 0;
-	upload_done = 0;
 	flash_request = 0;
 	reboot_request = 0;
+	prog_phase = 0;
+	prog_done = 0;
+	prog_total = 0;
+	prog_erase_done = 0;
+	prog_erase_total = 0;
+	prog_write_done = 0;
+	prog_write_total = 0;
+	current_force_recreate = false;
 	memset(&leds, 0, sizeof(leds));
 	rc = recovery_status_led_init(&status_leds);
 	if (!rc) {
@@ -2638,6 +2851,7 @@ int run_http_recovery(void)
 		WATCHDOG_RESET();
 	}
 
+	recovery_cancel_timeouts();
 	recovery_dhcp_server_stop(&dhcp);
 	net_lwip_set_recovery_dhcp_hook(NULL, NULL);
 	recovery_lwip_cleanup(netif);

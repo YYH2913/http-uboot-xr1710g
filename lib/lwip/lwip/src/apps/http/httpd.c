@@ -1839,8 +1839,6 @@ http_post_request(struct pbuf *inp, struct http_state *hs,
           }
         }
         if (content_len >= 0) {
-          printf("httpd: POST headers accepted, content_len=%d data_len=%u\n",
-                 content_len, data_len);
           /* adjust length of HTTP header passed to application */
           const char *hdr_start_after_uri = uri_end + 1;
           u16_t hdr_len = (u16_t)LWIP_MIN(data_len, crlfcrlf + 4 - data);
