@@ -1,37 +1,97 @@
 <!doctype html>
-<html lang="en">
+<html lang='en'>
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>XR1710G Recovery Error</title>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>XR1710G Upload Failed</title>
 <style>
+:root{
+  color-scheme:light;
+  --bg:#f2f4f8;
+  --panel:#ffffff;
+  --line:#d6dde7;
+  --ink:#1d2733;
+  --muted:#6b7788;
+  --blue:#2878e3;
+  --blue-dark:#1762c2;
+  --red:#b34338;
+  --red-soft:#fbecea;
+}
+*{box-sizing:border-box}
 body{
+  min-height:100svh;
   margin:0;
-  min-height:100vh;
   display:grid;
   place-items:center;
-  font-family:Georgia,"Times New Roman",serif;
-  background:linear-gradient(160deg,#160d0d,#341617 55%,#532120);
-  color:#f7ece8;
+  padding:20px;
+  color:var(--ink);
+  background:var(--bg);
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif;
 }
 .panel{
-  max-width:520px;
-  margin:24px;
-  padding:28px 24px;
-  border-radius:20px;
-  background:rgba(0,0,0,.18);
-  border:1px solid rgba(255,255,255,.14);
+  width:min(560px,100%);
+  overflow:hidden;
+  border:1px solid var(--line);
+  border-radius:8px;
+  background:var(--panel);
+  box-shadow:0 12px 34px rgba(45,64,89,.10);
 }
-h1{margin:0 0 10px;font-size:30px}
-p{margin:0 0 12px;line-height:1.5}
-a{color:#ffd8c7}
+.head{
+  display:flex;
+  align-items:center;
+  gap:14px;
+  padding:22px 24px;
+  border-bottom:1px solid #edcbc7;
+  background:var(--red-soft);
+}
+.mark{
+  width:36px;
+  height:36px;
+  flex:0 0 36px;
+  display:grid;
+  place-items:center;
+  border-radius:7px;
+  color:#ffffff;
+  background:var(--red);
+  font-size:19px;
+  font-weight:800;
+}
+h1{margin:0;font-size:20px}
+.head p{margin:4px 0 0;color:var(--red);font-size:12px;font-weight:650}
+.content{padding:24px}
+.content>p{margin:0;color:var(--muted);line-height:1.7}
+ul{margin:18px 0 22px;padding-left:19px;color:#566273;font-size:13px;line-height:1.9}
+a{
+  min-height:42px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:0 16px;
+  border:1px solid var(--blue-dark);
+  border-radius:7px;
+  color:#ffffff;
+  background:var(--blue);
+  text-decoration:none;
+  font-weight:720;
+}
+a:hover{background:var(--blue-dark)}
 </style>
 </head>
 <body>
-  <div class="panel">
-    <h1>Upload rejected</h1>
-    <p>Check the selected target and image file.</p>
-    <p><a href="/index.html">Return to the recovery page</a></p>
-  </div>
+  <main class='panel'>
+    <header class='head'>
+      <div class='mark'>!</div>
+      <div><h1>Upload Failed</h1><p>No erase or write operation was started</p></div>
+    </header>
+    <section class='content'>
+      <p>The recovery server could not accept this image. Check the selected target and file, then try again.</p>
+      <ul>
+        <li>Firmware images must be at least 1 MiB.</li>
+        <li>U-Boot images must not exceed 1 MiB.</li>
+        <li>Only one recovery task can run at a time.</li>
+      </ul>
+      <a href='/index.html'>Return to Recovery</a>
+    </section>
+  </main>
 </body>
 </html>

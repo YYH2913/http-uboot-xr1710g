@@ -196,7 +196,6 @@ enum upload_target {
 	TARGET_UBOOT,
 };
 static enum upload_target current_target = TARGET_FIRMWARE;
-static bool current_force_recreate;
 
 enum recovery_backend {
 	RECOVERY_BACKEND_MTD = 0,
@@ -1694,7 +1693,7 @@ static bool recovery_preserve_ubi_volume(const char *name)
 }
 
 static unsigned long long
-recovery_calc_forced_ubi_limit(struct recovery_target *target)
+recovery_calc_rebuild_ubi_limit(struct recovery_target *target)
 {
 #if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
 	struct ubi_device *ubi;
@@ -2223,7 +2222,7 @@ static int recovery_create_ubi_target(struct recovery_target *target,
 /* Determine maximum payload size based on selected target and DTS-defined MTD
  * layout. Returns 0 on error. */
 static unsigned long recovery_calc_target_max(enum upload_target tgt,
-					      bool force_recreate, loff_t *p_ofs)
+					      loff_t *p_ofs)
 {
 	struct recovery_target target;
 	unsigned long limit = 0;
@@ -2236,8 +2235,8 @@ static unsigned long recovery_calc_target_max(enum upload_target tgt,
 		*p_ofs = target.ofs;
 
 	effective_limit = target.limit;
-	if (force_recreate && tgt == TARGET_FIRMWARE)
-		effective_limit = recovery_calc_forced_ubi_limit(&target);
+	if (tgt == TARGET_FIRMWARE)
+		effective_limit = recovery_calc_rebuild_ubi_limit(&target);
 
 	limit = (effective_limit > ULONG_MAX) ? ULONG_MAX :
 		(unsigned long)effective_limit;
@@ -2417,8 +2416,6 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
     prog_erase_total = 0;
     prog_write_done = 0;
     prog_write_total = 0;
-    current_force_recreate = false;
-
 	    /* Accept optional query parameters after the target path. */
     if (!strncmp(uri, "/upload/firmware", 16) && (uri[16] == '\0' || uri[16] == '?'))
         current_target = TARGET_FIRMWARE;
@@ -2432,18 +2429,11 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
         return ERR_ARG;
     }
 
-    if (current_target == TARGET_FIRMWARE &&
-        (strstr(uri, "?recreate=1") || strstr(uri, "&recreate=1") ||
-         strstr(uri, "?force_recreate=1") || strstr(uri, "&force_recreate=1")))
-        current_force_recreate = true;
-
     {
         ulong min = 0;
         ulong env_max = env_get_hex("recovery_max", 0);
         loff_t tmpofs = 0;
-        ulong dts_max = recovery_calc_target_max(current_target,
-                                                 current_force_recreate,
-                                                 &tmpofs);
+        ulong dts_max = recovery_calc_target_max(current_target, &tmpofs);
         ulong max = dts_max ? dts_max : RECOVERY_UPLOAD_MAX;
 
         if (current_target == TARGET_FIRMWARE)
@@ -2504,9 +2494,8 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
     post_ok = 1;
     /* Leave response_uri untouched here so the POST can complete normally. */
     const char *tname = current_target == TARGET_FIRMWARE ? "firmware" : "uboot";
-    printf("httpd: accepting upload of %u bytes for %s to 0x%08lx%s\n",
-           recv_total, tname, (ulong)recv_base,
-           current_force_recreate ? " (force recreate)" : "");
+    printf("httpd: accepting upload of %u bytes for %s to 0x%08lx\n",
+           recv_total, tname, (ulong)recv_base);
     return ERR_OK;
 }
 
@@ -2588,9 +2577,9 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		return ret;
 	}
 
-	if (current_force_recreate && current_target == TARGET_FIRMWARE &&
+	if (current_target == TARGET_FIRMWARE &&
 	    target.backend == RECOVERY_BACKEND_UBI)
-		target.limit = recovery_calc_forced_ubi_limit(&target);
+		target.limit = recovery_calc_rebuild_ubi_limit(&target);
 
 	if (image_size > target.limit) {
 		printf("Image size %u exceeds target size %llu\n",
@@ -2603,8 +2592,8 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	if (target.backend == RECOVERY_BACKEND_UBI) {
 		bool reformatted = false;
 
-		if (current_force_recreate && current_target == TARGET_FIRMWARE)
-			printf("Force recreate requested: removing non-preserved UBI volumes before flashing.\n");
+		if (current_target == TARGET_FIRMWARE)
+			printf("Recovery mode: rebuilding non-preserved UBI volumes.\n");
 
 		ret = recovery_prepare_ubi_target(&target, status_leds, image_size,
 						      &reformatted);
@@ -2759,7 +2748,6 @@ int run_http_recovery(void)
 	prog_erase_total = 0;
 	prog_write_done = 0;
 	prog_write_total = 0;
-	current_force_recreate = false;
 	memset(&leds, 0, sizeof(leds));
 	rc = recovery_status_led_init(&status_leds);
 	if (!rc) {

@@ -1,517 +1,648 @@
 <!doctype html>
-<html lang="en">
+<html lang='en'>
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>XR1710G Recovery</title>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>XR1710G Recovery Mode</title>
 <style>
 :root{
-  --ink:#1a2530;
-  --muted:#677786;
+  color-scheme:light;
+  --bg:#f2f4f8;
+  --side:#ffffff;
   --panel:#ffffff;
-  --panel-2:#f4f7f9;
-  --line:rgba(26,37,48,.1);
-  --accent:#de6b3a;
-  --accent-2:#348ea3;
-  --bg-1:#f7f4ef;
-  --bg-2:#eef3f6;
-  --bg-3:#ffffff;
+  --soft:#f5f7fb;
+  --line:#dfe4ec;
+  --line-strong:#cbd3df;
+  --ink:#1d2733;
+  --muted:#6b7788;
+  --blue:#2878e3;
+  --blue-dark:#1762c2;
+  --blue-soft:#eaf2ff;
+  --green:#23815b;
+  --green-soft:#eaf6f0;
+  --red:#b34338;
+  --red-soft:#fbecea;
+  --info:#f1f6fd;
+  --info-line:#b9d3f6;
 }
 *{box-sizing:border-box}
+html,body{min-height:100%;margin:0}
 body{
-  margin:0;
-  min-height:100vh;
-  font-family:Georgia,"Times New Roman",serif;
   color:var(--ink);
-  background:
-    radial-gradient(circle at top, rgba(222,107,58,.08), transparent 24%),
-    linear-gradient(180deg, var(--bg-1), var(--bg-2) 52%, var(--bg-3));
+  background:var(--bg);
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Microsoft YaHei,sans-serif;
+  font-size:14px;
 }
-.shell{
-  max-width:860px;
-  margin:0 auto;
-  padding:30px 16px 42px;
-}
-.hero{
-  border:1px solid var(--line);
-  border-radius:24px;
-  padding:24px 22px 20px;
-  background:linear-gradient(180deg, var(--panel), var(--panel-2));
-  box-shadow:0 22px 50px rgba(26,37,48,.08);
-}
-.eyebrow{
-  margin:0;
-  letter-spacing:.18em;
-  text-transform:uppercase;
-  font-size:12px;
-  color:var(--muted);
-}
-h1{
-  margin:10px 0 8px;
-  font-size:36px;
-  line-height:1.02;
-}
-.lead,.meta,.note{
-  margin:0;
-  color:var(--muted);
-}
-.lead{font-size:15px}
-.meta{font-size:12px;margin-top:14px}
-.note{font-size:13px;margin-top:10px}
-.toolbar{
+button,input{font:inherit;letter-spacing:0}
+.app{
+  min-height:100svh;
   display:grid;
-  grid-template-columns:1.35fr .85fr auto;
-  gap:10px;
-  margin-top:22px;
+  grid-template-columns:270px minmax(0,1fr);
+  animation:page-in .28s ease both;
 }
-.force-row{
-  margin-top:14px;
-  padding:12px 14px;
-  border-radius:16px;
-  border:1px solid rgba(26,37,48,.1);
-  background:rgba(255,255,255,.72);
+.sidebar{
+  min-height:100svh;
+  display:flex;
+  flex-direction:column;
+  padding:30px 22px 24px;
+  border-right:1px solid var(--line);
+  background:var(--side);
 }
-.force-row label{
+.brand{
+  padding:4px 8px 24px;
+  border-bottom:1px solid var(--line);
+}
+.brand strong{display:block;font-size:17px;font-weight:780}
+.brand span{display:block;margin-top:6px;color:var(--muted);font-size:12px}
+.nav-label{
+  margin:28px 8px 10px;
+  color:#8b95a3;
+  font-size:11px;
+  font-weight:760;
+  text-transform:uppercase;
+}
+.nav{
+  display:grid;
+  gap:6px;
+}
+.nav-button{
+  min-height:44px;
   display:flex;
   align-items:center;
-  gap:10px;
-  font-size:14px;
-  font-weight:700;
-}
-.force-row input{
-  width:auto;
-  margin:0;
-}
-.force-row p{
-  margin:8px 0 0 0;
-  color:var(--muted);
-  font-size:13px;
-}
-input,select,button{
-  width:100%;
-  border-radius:14px;
-  font:inherit;
-}
-input,select{
-  border:1px solid rgba(26,37,48,.12);
-  padding:13px 14px;
-  color:#18232d;
-  background:#ffffff;
-}
-button{
-  border:0;
-  padding:13px 18px;
-  color:#fffaf8;
-  font-weight:700;
-  background:linear-gradient(90deg, var(--accent), #f59a5c);
+  gap:11px;
+  padding:0 12px;
+  border:1px solid transparent;
+  border-radius:7px;
+  color:#354150;
+  background:transparent;
   cursor:pointer;
+  text-align:left;
+  font-weight:650;
+  transition:color .16s ease,background .16s ease,border-color .16s ease;
 }
-button.secondary{
-  background:linear-gradient(90deg, var(--accent-2), #63b6c5);
+.nav-button:hover{color:var(--blue);background:#f6f9fe}
+.nav-button.active{
+  color:var(--blue-dark);
+  border-color:#a9c8f4;
+  background:var(--blue-soft);
 }
-button:disabled{opacity:.6;cursor:default}
-.targets{
-  display:grid;
-  grid-template-columns:1fr 1fr;
-  gap:12px;
-  margin-top:18px;
+.nav-button:disabled{cursor:default;opacity:.55}
+.nav-dot{
+  width:9px;
+  height:9px;
+  flex:0 0 9px;
+  border-radius:50%;
+  background:var(--blue);
+  box-shadow:0 0 0 4px rgba(40,120,227,.10);
 }
-.target{
-  padding:16px;
-  border-radius:18px;
-  border:1px solid rgba(26,37,48,.08);
-  background:#fbfcfd;
-}
-.target.active{
-  border-color:rgba(222,107,58,.3);
-  background:linear-gradient(180deg, rgba(222,107,58,.08), rgba(255,255,255,1));
-}
-.target h2{
-  margin:0 0 8px;
-  font-size:20px;
-}
-.target p{
-  margin:0;
+.side-meta{
+  margin-top:auto;
+  padding:20px 8px 0;
+  border-top:1px solid var(--line);
   color:var(--muted);
-  line-height:1.5;
-  font-size:14px;
+  font-size:11px;
+  line-height:1.6;
 }
-.progress{
-  display:none;
-  margin-top:20px;
+.side-meta strong{display:block;color:#44505e;font-weight:680}
+.main{
+  min-width:0;
+  display:flex;
+  align-items:flex-start;
+  justify-content:center;
+  padding:42px 34px 30px;
 }
-.progress-row{margin-top:12px}
-.progress-label{
-  margin-bottom:6px;
-  color:#465662;
-  font-size:13px;
-}
-.progress-bar{
-  position:relative;
+.workspace{width:min(760px,100%)}
+.panel{
   overflow:hidden;
-  border-radius:999px;
-  background:#e7edf1;
-  height:24px;
+  border:1px solid var(--line-strong);
+  border-radius:8px;
+  background:var(--panel);
+  box-shadow:0 12px 34px rgba(45,64,89,.08);
 }
-.progress-fill{
-  position:absolute;
-  inset:0 auto 0 0;
-  width:0;
-  background:linear-gradient(90deg, #6aa9db, #93ccef);
-  transition:width .25s ease;
-}
-.progress-fill.complete{
-  background:linear-gradient(90deg, var(--accent-2), #8ad7c9);
-}
-.progress-fill.inactive{
-  background:#d6dfe5;
-}
-.progress-text{
-  position:relative;
-  z-index:1;
-  line-height:24px;
+.panel-inner{padding:32px 38px 30px}
+.heading{
+  padding-bottom:24px;
+  border-bottom:1px solid var(--line);
   text-align:center;
+}
+.heading h1{
+  margin:0;
+  color:var(--blue);
+  font-size:30px;
+  line-height:1.15;
+  font-weight:780;
+}
+.heading p{
+  max-width:540px;
+  margin:14px auto 0;
+  color:var(--muted);
+  line-height:1.7;
+}
+.target-info{
+  width:min(420px,100%);
+  margin:24px auto 0;
+  display:grid;
+  grid-template-columns:90px minmax(0,1fr);
+  gap:0;
+  overflow:hidden;
+  border:1px solid var(--line);
+  border-radius:7px;
+  background:var(--soft);
+}
+.target-info span{
+  min-height:38px;
+  display:flex;
+  align-items:center;
+  padding:8px 12px;
+  border-top:1px solid var(--line);
+  overflow-wrap:anywhere;
+}
+.target-info span:nth-child(-n+2){border-top:0}
+.target-label{color:var(--muted);font-size:12px;font-weight:720}
+.target-value{color:#344151;font-size:13px;font-weight:650}
+.file-block{margin-top:26px}
+.file-label{display:block;margin-bottom:9px;color:#465363;font-size:13px;font-weight:700}
+.file-row{
+  min-height:48px;
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr);
+  align-items:center;
+  overflow:hidden;
+  border:1px solid var(--line-strong);
+  border-radius:7px;
+  background:#f7f8fb;
+}
+#file-input{display:none}
+.choose-button{
+  align-self:stretch;
+  padding:0 18px;
+  border:0;
+  border-right:1px solid var(--line-strong);
+  color:#324052;
+  background:#ffffff;
+  cursor:pointer;
+  font-weight:680;
+}
+.choose-button:hover{color:var(--blue);background:#f9fbff}
+.choose-button:disabled{cursor:default;opacity:.55}
+.file-name{
+  min-width:0;
+  padding:0 14px;
+  overflow:hidden;
+  color:var(--muted);
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.file-name.selected{color:#2e3a48;font-weight:620}
+.file-help{
+  min-height:20px;
+  margin:8px 0 0;
+  color:var(--muted);
   font-size:12px;
 }
-#reboot-msg{
-  display:none;
-  margin-top:14px;
-  color:#80502f;
+.file-help.ok{color:var(--green)}
+.file-help.error{color:var(--red)}
+.upload-wrap{display:flex;justify-content:center;margin-top:20px}
+.upload-button{
+  min-width:160px;
+  min-height:46px;
+  padding:0 22px;
+  border:1px solid var(--blue-dark);
+  border-radius:7px;
+  color:#ffffff;
+  background:var(--blue);
+  cursor:pointer;
+  font-size:16px;
+  font-weight:760;
+  box-shadow:0 7px 18px rgba(40,120,227,.20);
+  transition:background .16s ease,transform .16s ease,box-shadow .16s ease,opacity .16s ease;
 }
-#log{
-  margin-top:18px;
-  min-height:150px;
-  padding:14px;
-  white-space:pre-wrap;
-  border-radius:18px;
-  border:1px solid rgba(26,37,48,.1);
-  background:#f7fafc;
-  font:12px/1.5 "Courier New",monospace;
-  overflow:auto;
+.upload-button:hover:not(:disabled){background:var(--blue-dark);transform:translateY(-1px);box-shadow:0 9px 22px rgba(40,120,227,.24)}
+.upload-button:disabled{cursor:default;opacity:.42;box-shadow:none}
+.progress-section{
+  margin-top:28px;
+  padding-top:22px;
+  border-top:1px solid var(--line);
 }
-@media (max-width:720px){
-  .toolbar,.targets{grid-template-columns:1fr}
-  h1{font-size:30px}
+.progress-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:16px;
+  margin-bottom:8px;
+}
+.progress-head strong{font-size:14px}
+.state{
+  padding:5px 9px;
+  border-radius:5px;
+  color:#6a7684;
+  background:#eef1f4;
+  font-size:11px;
+  font-weight:740;
+}
+.state[data-tone='working']{color:var(--blue-dark);background:var(--blue-soft)}
+.state[data-tone='success']{color:var(--green);background:var(--green-soft)}
+.state[data-tone='error']{color:var(--red);background:var(--red-soft)}
+.status-message{min-height:20px;margin:0 0 10px;color:var(--muted);font-size:12px}
+.progress-row{
+  min-height:48px;
+  display:grid;
+  grid-template-columns:58px minmax(0,1fr) 44px;
+  align-items:center;
+  gap:12px;
+  border-top:1px solid var(--line);
+}
+.progress-label{color:#435060;font-size:12px;font-weight:720}
+.progress-track{height:7px;overflow:hidden;border-radius:4px;background:#e6eaf0}
+.progress-fill{
+  width:0;
+  height:100%;
+  border-radius:4px;
+  background:var(--blue);
+  transition:width .22s ease;
+}
+.progress-row.active .progress-fill{
+  background-image:linear-gradient(90deg,var(--blue),#78aef1,var(--blue));
+  background-size:180% 100%;
+  animation:flow 1.3s linear infinite;
+}
+.progress-row.complete .progress-fill{background:var(--green)}
+.progress-percent{text-align:right;color:#788391;font:11px ui-monospace,SFMono-Regular,Consolas,monospace}
+.notice{
+  margin-top:24px;
+  padding:16px 18px;
+  border:1px solid var(--info-line);
+  border-radius:7px;
+  background:var(--info);
+}
+.notice strong{display:block;margin-bottom:8px;color:#234a7c;font-size:13px}
+.notice ul{margin:0;padding-left:18px;color:#526985;font-size:12px;line-height:1.8}
+.footer{
+  padding:18px 8px 0;
+  color:#7d8794;
+  text-align:center;
+  font-size:11px;
+}
+@keyframes page-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes flow{to{background-position:-180% 0}}
+@media(max-width:760px){
+  .app{grid-template-columns:1fr}
+  .sidebar{min-height:0;padding:16px;border-right:0;border-bottom:1px solid var(--line)}
+  .brand{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:0 2px 14px}
+  .brand span{margin:0;text-align:right}
+  .nav-label{display:none}
+  .nav{grid-template-columns:1fr 1fr;gap:8px}
+  .nav-button{justify-content:center;font-size:13px}
+  .side-meta{display:none}
+  .main{padding:18px 12px 24px}
+}
+@media(max-width:520px){
+  .panel-inner{padding:24px 18px 22px}
+  .heading{padding-bottom:18px}
+  .heading h1{font-size:26px}
+  .heading p{margin-top:10px;line-height:1.55}
+  .target-info{margin-top:18px;grid-template-columns:96px minmax(0,1fr)}
+  .file-block{margin-top:20px}
+  .choose-button{padding:0 13px}
+  .progress-section{margin-top:24px}
+  .notice{margin-top:18px}
+}
+@media(prefers-reduced-motion:reduce){
+  *,*:before,*:after{animation:none!important;transition:none!important}
 }
 </style>
 </head>
 <body>
-<div class="shell">
-  <section class="hero">
-    <p class="eyebrow">XR1710G Recovery</p>
-    <h1>Upload firmware or chainloader</h1>
-    <p class="lead">Recovery endpoint: <strong>192.168.255.1</strong></p>
-    <p class="note">`firmware` writes `ubi:fit`, `uboot` writes the raw chainloader slot.</p>
-
-    <div class="targets">
-      <div class="target active" id="card-firmware">
-        <h2>firmware</h2>
-        <p>OpenWrt FIT image</p>
-        <p>Must be at least 1024 KiB</p>
-      </div>
-      <div class="target" id="card-uboot">
-        <h2>uboot</h2>
-        <p>`xr1710g-chainloader-slot.bin`</p>
-        <p>Must not exceed 1024 KiB</p>
-      </div>
+<div class='app'>
+  <aside class='sidebar'>
+    <div class='brand'>
+      <div><strong>XR1710G Recovery Mode</strong><span>Recovery WebUI</span></div>
     </div>
-
-    <div class="toolbar">
-      <input id="f" type="file">
-      <select id="t" onchange="changeTarget()">
-        <option value="firmware">firmware</option>
-        <option value="uboot">uboot</option>
-      </select>
-      <button id="btn" onclick="upload()">Upload</button>
+    <p class='nav-label'>Recovery</p>
+    <nav class='nav' aria-label='Recovery target'>
+      <button class='nav-button active' type='button' data-target='firmware' aria-current='page'><span class='nav-dot'></span>Firmware Recovery</button>
+      <button class='nav-button' type='button' data-target='uboot'><span class='nav-dot'></span>Update U-Boot</button>
+    </nav>
+    <div class='side-meta'>
+      <strong>192.168.255.1</strong>
+      <span id='version'>Loading U-Boot version...</span>
     </div>
+  </aside>
 
-    <div class="force-row" id="force-wrap">
-      <label>
-        <input id="force-recreate" type="checkbox">
-        Force wipe and recreate firmware volumes
-      </label>
-      <p>Removes non-preserved UBI volumes before recreating `ubi:fit`.</p>
-    </div>
+  <main class='main'>
+    <div class='workspace'>
+      <section class='panel'>
+        <div class='panel-inner'>
+          <header class='heading'>
+            <h1 id='page-title'>Firmware Recovery</h1>
+            <p id='page-copy'>Upload an OpenWrt FIT image. All non-preserved UBI volumes will be rebuilt.</p>
+          </header>
 
-    <div class="progress" id="progress">
-      <div class="progress-row">
-        <div class="progress-label">Upload</div>
-        <div class="progress-bar">
-          <div class="progress-fill inactive" id="upload-fill"></div>
-          <div class="progress-text" id="upload-text">0%</div>
+          <div class='target-info'>
+            <span class='target-label'>Target</span><span class='target-value' id='target-value'>ubi:fit</span>
+            <span class='target-label'>Operation</span><span class='target-value' id='scope-value'>Rebuild fit, rootfs_data, and other non-preserved volumes</span>
+            <span class='target-label'>Preserved</span><span class='target-value' id='preserve-value'>factory, ubootenv, ubootenv2</span>
+          </div>
+
+          <div class='file-block'>
+            <label class='file-label'>Select image file</label>
+            <input id='file-input' type='file' accept='.bin,.img,.itb'>
+            <div class='file-row'>
+              <button class='choose-button' id='choose-button' type='button'>Choose File</button>
+              <span class='file-name' id='file-name'>No file selected</span>
+            </div>
+            <p class='file-help' id='file-help'>Firmware images must be at least 1 MiB</p>
+          </div>
+
+          <div class='upload-wrap'>
+            <button class='upload-button' id='upload-button' type='button' disabled>Upload and Recover</button>
+          </div>
+
+          <section class='progress-section' aria-label='Recovery progress'>
+            <div class='progress-head'>
+              <strong>Recovery Progress</strong>
+              <span class='state' id='state' data-tone='idle'>Idle</span>
+            </div>
+            <p class='status-message' id='status-message'>Select an image file.</p>
+            <div class='progress-row' id='row-upload'>
+              <span class='progress-label'>Upload</span>
+              <div class='progress-track'><div class='progress-fill' id='upload-fill'></div></div>
+              <span class='progress-percent' id='upload-percent'>0%</span>
+            </div>
+            <div class='progress-row' id='row-erase'>
+              <span class='progress-label'>Erase</span>
+              <div class='progress-track'><div class='progress-fill' id='erase-fill'></div></div>
+              <span class='progress-percent' id='erase-percent'>0%</span>
+            </div>
+            <div class='progress-row' id='row-write'>
+              <span class='progress-label'>Write</span>
+              <div class='progress-track'><div class='progress-fill' id='write-fill'></div></div>
+              <span class='progress-percent' id='write-percent'>0%</span>
+            </div>
+          </section>
+
+          <aside class='notice'>
+            <strong>Important</strong>
+            <ul id='notice-list'>
+              <li>Do not power off the device during recovery.</li>
+              <li>Firmware recovery rebuilds rootfs_data and other non-preserved UBI volumes.</li>
+              <li>The device restarts automatically when recovery completes.</li>
+            </ul>
+          </aside>
         </div>
-      </div>
-      <div class="progress-row">
-        <div class="progress-label">Erase</div>
-        <div class="progress-bar">
-          <div class="progress-fill inactive" id="erase-fill"></div>
-          <div class="progress-text" id="erase-text">0%</div>
-        </div>
-      </div>
-      <div class="progress-row">
-        <div class="progress-label">Write</div>
-        <div class="progress-bar">
-          <div class="progress-fill inactive" id="write-fill"></div>
-          <div class="progress-text" id="write-text">0%</div>
-        </div>
-      </div>
+      </section>
+      <footer class='footer' id='footer-version'>XR1710G HTTP Recovery</footer>
     </div>
-
-    <p id="reboot-msg">Flash complete. Rebooting in <strong id="reboot-sec">3</strong>s.</p>
-    <div id="log"></div>
-    <p class="meta" id="meta">Loading U-Boot version...</p>
-  </section>
+  </main>
 </div>
+
 <script>
-var pollTimer = null;
-var lastPhase = 0;
-var countdownStarted = false;
-var pollEpoch = 0;
-var pollOutcome = 0;
+var activeTarget='firmware';
+var selectedFile=null;
+var busy=false;
+var pollTimer=null;
+var pollEpoch=0;
+var pollOutcome=0;
 
-function log(msg) {
-  var box = document.getElementById("log");
-  box.textContent += msg + "\n";
-  box.scrollTop = box.scrollHeight;
-}
-
-function changeTarget() {
-  var target = document.getElementById("t").value;
-  var forceWrap = document.getElementById("force-wrap");
-  var forceBox = document.getElementById("force-recreate");
-  document.getElementById("card-firmware").className =
-    "target" + (target === "firmware" ? " active" : "");
-  document.getElementById("card-uboot").className =
-    "target" + (target === "uboot" ? " active" : "");
-  document.getElementById("btn").className =
-    target === "uboot" ? "secondary" : "";
-  forceWrap.style.display = target === "firmware" ? "block" : "none";
-  if (target !== "firmware")
-    forceBox.checked = false;
-}
-
-function setBar(name, pct, detail, state) {
-  var fill = document.getElementById(name + "-fill");
-  var text = document.getElementById(name + "-text");
-  var safePct = Math.max(0, Math.min(100, Math.round(pct || 0)));
-
-  fill.className = "progress-fill" + (state ? " " + state : "");
-  fill.style.width = safePct + "%";
-  text.textContent = safePct + "%" + (detail || "");
-}
-
-function resetProgress() {
-  setBar("upload", 0, "", "inactive");
-  setBar("erase", 0, "", "inactive");
-  setBar("write", 0, "", "inactive");
-}
-
-function setUploadProgress(pct, detail, complete) {
-  setBar("upload", pct, detail, complete ? "complete" : "");
-  if (lastPhase !== 0)
-    lastPhase = 0;
-}
-
-function setBurnProgress(phase, pct, detail) {
-  if (phase === 1) {
-    setBar("upload", 100, "", "complete");
-    setBar("erase", pct, detail, "");
-    setBar("write", 0, "", "inactive");
-    if (lastPhase !== 1) {
-      log("Erasing target...");
-      lastPhase = 1;
-    }
-  } else if (phase === 2) {
-    setBar("upload", 100, "", "complete");
-    setBar("erase", 100, "", "complete");
-    setBar("write", pct, detail, "");
-    if (lastPhase !== 2) {
-      log("Writing target...");
-      lastPhase = 2;
-    }
-  } else if (phase === 3) {
-    setBar("upload", 100, "", "complete");
-    setBar("erase", 100, "", "complete");
-    setBar("write", 100, "", "complete");
-  } else {
-    setBar("erase", 0, "", "inactive");
-    setBar("write", 0, "", "inactive");
+var profiles={
+  firmware:{
+    title:'Firmware Recovery',
+    copy:'Upload an OpenWrt FIT image. All non-preserved UBI volumes will be rebuilt.',
+    target:'ubi:fit',
+    scope:'Rebuild fit, rootfs_data, and other non-preserved volumes',
+    preserve:'factory, ubootenv, ubootenv2',
+    help:'Firmware images must be at least 1 MiB',
+    action:'Upload and Recover',
+    notices:['Do not power off the device during recovery.','Firmware recovery rebuilds rootfs_data and other non-preserved UBI volumes.','The device restarts automatically when recovery completes.']
+  },
+  uboot:{
+    title:'Update U-Boot',
+    copy:'Upload an XR1710G chainloader image. Only the raw U-Boot slot will be written.',
+    target:'SPI-NAND @ 0x600000',
+    scope:'Write the 1 MiB chainloader slot',
+    preserve:'All UBI firmware volumes and configuration data',
+    help:'U-Boot images must not exceed 1 MiB',
+    action:'Upload and Update',
+    notices:['Do not power off the device during the U-Boot update.','The image format is validated before writing.','UBI firmware volumes are not modified.']
   }
-}
+};
 
-function showProgress(show) {
-  document.getElementById("progress").style.display = show ? "block" : "none";
-}
+var fileInput=document.getElementById('file-input');
+var chooseButton=document.getElementById('choose-button');
+var fileName=document.getElementById('file-name');
+var fileHelp=document.getElementById('file-help');
+var uploadButton=document.getElementById('upload-button');
+var state=document.getElementById('state');
+var statusMessage=document.getElementById('status-message');
 
-function startCountdown(seconds) {
-  if (countdownStarted)
-    return;
-  countdownStarted = true;
-  document.getElementById("reboot-msg").style.display = "block";
-  document.getElementById("reboot-sec").textContent = String(seconds);
-  function tick(left) {
-    if (left <= 0)
-      return;
-    document.getElementById("reboot-sec").textContent = String(left);
-    setTimeout(function() { tick(left - 1); }, 1000);
+function profile(){return profiles[activeTarget]}
+
+function setTarget(target){
+  if(busy||!profiles[target])return;
+  activeTarget=target;
+  var p=profile();
+  var buttons=document.querySelectorAll('.nav-button');
+  for(var i=0;i<buttons.length;i++){
+    var active=buttons[i].getAttribute('data-target')===target;
+    buttons[i].classList.toggle('active',active);
+    if(active)buttons[i].setAttribute('aria-current','page');
+    else buttons[i].removeAttribute('aria-current');
   }
-  setTimeout(function() { tick(seconds - 1); }, 1000);
-}
-
-async function pollStatus(epoch) {
-  if (epoch !== pollEpoch || pollOutcome !== 0)
-    return;
-
-  try {
-    var response = await fetch("/status");
-    if (epoch !== pollEpoch || pollOutcome !== 0)
-      return;
-
-    var data = await response.json();
-    if (epoch !== pollEpoch || pollOutcome !== 0)
-      return;
-
-    if (data.in_progress) {
-      var phase = data.phase || 0;
-      var pct = 0;
-      var detail = "";
-
-      if (phase === 1) {
-        pct = data.erase_total ? Math.round(data.erase_done * 100 / data.erase_total) : 0;
-        detail = " (" + Math.round((data.erase_done || 0) / 1024) + "KB/" +
-                 Math.round((data.erase_total || 0) / 1024) + "KB)";
-      } else if (phase === 2) {
-        pct = data.write_total ? Math.round(data.write_done * 100 / data.write_total) : 0;
-        detail = " (" + Math.round((data.write_done || 0) / 1024) + "KB/" +
-                 Math.round((data.write_total || 0) / 1024) + "KB)";
-      }
-
-      setBurnProgress(phase, pct, detail);
-    } else if (data.ok) {
-      pollOutcome = 1;
-      setBurnProgress(3, 100, "");
-      if (pollTimer) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-      }
-      log("Flash successful.");
-      startCountdown(3);
-    } else if (data.error) {
-      pollOutcome = -1;
-      if (pollTimer) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-      }
-      log("Flash failed.");
-      document.getElementById("btn").disabled = false;
-    }
-  } catch (err) {
+  document.getElementById('page-title').textContent=p.title;
+  document.getElementById('page-copy').textContent=p.copy;
+  document.getElementById('target-value').textContent=p.target;
+  document.getElementById('scope-value').textContent=p.scope;
+  document.getElementById('preserve-value').textContent=p.preserve;
+  fileHelp.textContent=p.help;
+  uploadButton.textContent=p.action;
+  var list=document.getElementById('notice-list');
+  list.textContent='';
+  for(var n=0;n<p.notices.length;n++){
+    var item=document.createElement('li');
+    item.textContent=p.notices[n];
+    list.appendChild(item);
   }
-}
-
-async function upload() {
-  var btn = document.getElementById("btn");
-  var file = document.getElementById("f").files[0];
-  var target = document.getElementById("t").value;
-  var forceRecreate =
-    target === "firmware" && document.getElementById("force-recreate").checked;
-  var minFirmware = 1024 * 1024;
-  var maxUboot = 1024 * 1024;
-  var payload;
-  var xhr = new XMLHttpRequest();
-  if (!file) {
-    log("No file selected.");
-    return;
-  }
-
-  if (target === "firmware" && file.size < minFirmware) {
-    log("Rejected: firmware image must be at least 1024 KiB.");
-    return;
-  }
-
-  if (target === "uboot" && file.size > maxUboot) {
-    log("Rejected: uboot image must not exceed 1024 KiB.");
-    return;
-  }
-
-  btn.disabled = true;
-  showProgress(true);
-  lastPhase = -1;
-  pollEpoch++;
-  pollOutcome = 0;
   resetProgress();
-  countdownStarted = false;
-  document.getElementById("reboot-msg").style.display = "none";
-  log("Uploading " + file.name + " to " + target + "...");
-  if (forceRecreate)
-    log("Force recreate enabled: non-preserved firmware volumes will be removed.");
-  if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
-  }
+  validateFile();
+}
 
-  log("Preparing upload buffer...");
-  try {
-    payload = await file.arrayBuffer();
-  } catch (err) {
-    log("Failed to read file: " + err);
-    btn.disabled = false;
+function formatBytes(bytes){
+  if(bytes<1024)return bytes+' B';
+  if(bytes<1024*1024)return(bytes/1024).toFixed(1)+' KiB';
+  return(bytes/(1024*1024)).toFixed(1)+' MiB';
+}
+
+function fileError(){
+  if(!selectedFile)return'';
+  if(activeTarget==='firmware'&&selectedFile.size<1024*1024)return'Firmware images must be at least 1 MiB.';
+  if(activeTarget==='uboot'&&selectedFile.size>1024*1024)return'U-Boot images must not exceed 1 MiB.';
+  return'';
+}
+
+function validateFile(){
+  var error=fileError();
+  fileHelp.className='file-help';
+  if(!selectedFile){
+    fileName.textContent='No file selected';
+    fileName.className='file-name';
+    fileHelp.textContent=profile().help;
+    statusMessage.textContent='Select an image file.';
+  }else{
+    fileName.textContent=selectedFile.name+'  ('+formatBytes(selectedFile.size)+')';
+    fileName.className='file-name selected';
+    if(error){
+      fileHelp.textContent=error;
+      fileHelp.classList.add('error');
+      statusMessage.textContent='The selected file does not meet the target requirements.';
+    }else{
+      fileHelp.textContent='File ready.';
+      fileHelp.classList.add('ok');
+      statusMessage.textContent='Ready to upload.';
+    }
+  }
+  uploadButton.disabled=busy||!selectedFile||!!error;
+}
+
+function setBusy(value){
+  busy=value;
+  chooseButton.disabled=value;
+  var buttons=document.querySelectorAll('.nav-button');
+  for(var i=0;i<buttons.length;i++)buttons[i].disabled=value;
+  validateFile();
+}
+
+function setState(label,tone,message){
+  state.textContent=label;
+  state.setAttribute('data-tone',tone||'idle');
+  if(message)statusMessage.textContent=message;
+}
+
+function setProgress(name,pct,rowState){
+  var value=Math.max(0,Math.min(100,Math.round(pct||0)));
+  var row=document.getElementById('row-'+name);
+  row.className='progress-row'+(rowState?' '+rowState:'');
+  document.getElementById(name+'-fill').style.width=value+'%';
+  document.getElementById(name+'-percent').textContent=value+'%';
+}
+
+function resetProgress(){
+  setProgress('upload',0,'');
+  setProgress('erase',0,'');
+  setProgress('write',0,'');
+  setState('Idle','idle',selectedFile?'Ready to upload.':'Select an image file.');
+}
+
+function updateFlashProgress(data){
+  var phase=data.phase||0;
+  if(phase===1){
+    setProgress('upload',100,'complete');
+    setProgress('erase',data.erase_total?data.erase_done*100/data.erase_total:0,'active');
+    setProgress('write',0,'');
+    setState('Erasing','working','Erasing the target region. Do not power off the device.');
+  }else if(phase===2){
+    setProgress('upload',100,'complete');
+    setProgress('erase',100,'complete');
+    setProgress('write',data.write_total?data.write_done*100/data.write_total:0,'active');
+    setState('Writing','working','Writing the image. Do not power off the device.');
+  }
+}
+
+function startCountdown(seconds){
+  function tick(left){
+    setState('Complete','success','Recovery complete. The device restarts in '+left+' seconds.');
+    if(left>0)setTimeout(function(){tick(left-1)},1000);
+  }
+  tick(seconds);
+}
+
+async function pollStatus(epoch){
+  if(epoch!==pollEpoch||pollOutcome!==0)return;
+  try{
+    var response=await fetch('/status',{cache:'no-store'});
+    var data=await response.json();
+    if(epoch!==pollEpoch||pollOutcome!==0)return;
+    if(data.in_progress){
+      updateFlashProgress(data);
+    }else if(data.ok){
+      pollOutcome=1;
+      if(pollTimer)clearInterval(pollTimer);
+      pollTimer=null;
+      setProgress('upload',100,'complete');
+      setProgress('erase',100,'complete');
+      setProgress('write',100,'complete');
+      startCountdown(3);
+    }else if(data.error){
+      pollOutcome=-1;
+      if(pollTimer)clearInterval(pollTimer);
+      pollTimer=null;
+      setState('Failed','error','Recovery failed. Check the serial console log.');
+      setBusy(false);
+    }
+  }catch(error){}
+}
+
+async function upload(){
+  if(!selectedFile||fileError())return;
+  setBusy(true);
+  resetProgress();
+  pollEpoch++;
+  pollOutcome=0;
+  setProgress('upload',0,'active');
+  setState('Uploading','working','Uploading the image file.');
+
+  var payload;
+  try{
+    payload=await selectedFile.arrayBuffer();
+  }catch(error){
+    setState('Failed','error','Could not read the selected file.');
+    setBusy(false);
     return;
   }
 
-  xhr.upload.addEventListener("progress", function(ev) {
-    if (!ev.lengthComputable || ev.total <= 0)
-      return;
-
-    setUploadProgress(
-      ev.loaded * 100 / ev.total,
-      " (" + Math.round((ev.loaded || 0) / 1024) + "KB/" +
-      Math.round((ev.total || 0) / 1024) + "KB)",
-      false
-    );
+  var xhr=new XMLHttpRequest();
+  xhr.upload.addEventListener('progress',function(event){
+    if(!event.lengthComputable||event.total<=0)return;
+    setProgress('upload',event.loaded*100/event.total,event.loaded>=event.total?'complete':'active');
   });
-
-  xhr.addEventListener("load", function() {
-    setUploadProgress(100, "", true);
-
-    if (xhr.status < 200 || xhr.status >= 300) {
-      log("Server responded with HTTP " + xhr.status + ".");
-      btn.disabled = false;
+  xhr.addEventListener('load',function(){
+    if(xhr.status<200||xhr.status>=300){
+      setState('Rejected','error','The server rejected this image. Check the file and try again.');
+      setBusy(false);
       return;
     }
-
-    log("Upload finished. Checking burn status...");
-    var epoch = pollEpoch;
-    pollTimer = setInterval(function() { pollStatus(epoch); }, 500);
-    setTimeout(function() { pollStatus(epoch); }, 100);
+    setProgress('upload',100,'complete');
+    setState('Processing','working','Upload complete. Waiting for erase and write operations.');
+    var epoch=pollEpoch;
+    pollTimer=setInterval(function(){pollStatus(epoch)},500);
+    setTimeout(function(){pollStatus(epoch)},100);
   });
-
-  xhr.addEventListener("error", function() {
-    log("Upload error: network request failed.");
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    }
-    btn.disabled = false;
+  xhr.addEventListener('error',function(){
+    setState('Network Error','error','Image upload failed. Reconnect and try again.');
+    setBusy(false);
   });
-
-  xhr.open("POST", "/upload/" + target + (forceRecreate ? "?recreate=1" : ""),
-           true);
-  xhr.setRequestHeader("Content-Type", "application/octet-stream");
+  xhr.open('POST','/upload/'+activeTarget,true);
+  xhr.setRequestHeader('Content-Type','application/octet-stream');
   xhr.send(payload);
 }
 
-(async function() {
-  changeTarget();
-  try {
-    var response = await fetch("/about");
-    if (!response.ok)
-      return;
-    var data = await response.json();
-    if (data && data.u_boot)
-      document.getElementById("meta").textContent = data.u_boot;
-  } catch (err) {
-  }
+var navButtons=document.querySelectorAll('.nav-button');
+for(var i=0;i<navButtons.length;i++){
+  navButtons[i].addEventListener('click',function(){setTarget(this.getAttribute('data-target'))});
+}
+chooseButton.addEventListener('click',function(){if(!busy)fileInput.click()});
+fileInput.addEventListener('change',function(){selectedFile=this.files[0]||null;validateFile()});
+uploadButton.addEventListener('click',upload);
+
+(async function(){
+  setTarget('firmware');
+  try{
+    var response=await fetch('/about',{cache:'no-store'});
+    var data=await response.json();
+    if(data&&data.u_boot){
+      document.getElementById('version').textContent=data.u_boot;
+      document.getElementById('footer-version').textContent=data.u_boot;
+    }
+  }catch(error){}
 })();
 </script>
 </body>
