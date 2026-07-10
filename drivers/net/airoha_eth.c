@@ -4963,6 +4963,15 @@ static bool airoha_qdma_ready(struct airoha_qdma *qdma)
 	return true;
 }
 
+static bool airoha_qdma_recovery_enabled(struct airoha_eth *eth,
+					 struct airoha_qdma *qdma)
+{
+	if (qdma == &eth->qdma[0])
+		return true;
+
+	return qdma == &eth->qdma[1] && airoha_gdm4_use_cdm2(eth);
+}
+
 static struct airoha_qdma *airoha_active_qdma(struct airoha_eth *eth)
 {
 	struct airoha_qdma *qdma1 = &eth->qdma[1];
@@ -5272,7 +5281,8 @@ static int airoha_eth_init(struct udevice *dev)
 	for (i = 0; i < AIROHA_MAX_NUM_QDMA; i++) {
 		struct airoha_qdma *qdma = &eth->qdma[i];
 
-		if (!airoha_qdma_ready(qdma))
+		if (!airoha_qdma_recovery_enabled(eth, qdma) ||
+		    !airoha_qdma_ready(qdma))
 			continue;
 
 		ret = airoha_qdma_runtime_reset(qdma);
@@ -5288,7 +5298,8 @@ static int airoha_eth_init(struct udevice *dev)
 		struct airoha_qdma *qdma = &eth->qdma[i];
 		struct airoha_queue *q;
 
-		if (!airoha_qdma_ready(qdma))
+		if (!airoha_qdma_recovery_enabled(eth, qdma) ||
+		    !airoha_qdma_ready(qdma))
 			continue;
 
 		q = &qdma->q_rx[qid];
@@ -5324,7 +5335,8 @@ static void airoha_eth_stop(struct udevice *dev)
 	for (i = 0; i < AIROHA_MAX_NUM_QDMA; i++) {
 		struct airoha_qdma *qdma = &eth->qdma[i];
 
-		if (!airoha_qdma_ready(qdma))
+		if (!airoha_qdma_recovery_enabled(eth, qdma) ||
+		    !airoha_qdma_ready(qdma))
 			continue;
 
 		airoha_qdma_stop_dma(qdma);
@@ -5658,7 +5670,8 @@ static int airoha_eth_recv(struct udevice *dev, int flags, uchar **packetp)
 		struct airoha_qdma *qdma = i ? &eth->qdma[active == &eth->qdma[0]] :
 					      active;
 
-		if (!airoha_qdma_ready(qdma))
+		if (!airoha_qdma_recovery_enabled(eth, qdma) ||
+		    !airoha_qdma_ready(qdma))
 			continue;
 
 		ret = airoha_eth_recv_qdma(eth, qdma, packetp);
