@@ -258,6 +258,10 @@
 #define AIROHA_RECOVERY_LAN_UP_SETTLE_MS 700
 #define AIROHA_RECOVERY_SWITCH_DOWN_SETTLE_MS 50
 #define AIROHA_RECOVERY_FDB_MOVE_FLUSH_MS 500
+#define AIROHA_RECOVERY_MDIO_RETRIES 3
+#define AIROHA_RECOVERY_MDIO_RETRY_US 1000
+#define AIROHA_RECOVERY_QDMA_STOP_TIMEOUT_US 10000
+#define AIROHA_RECOVERY_TX_TIMEOUT_US 5000
 
 /* FE */
 #define PSE_BASE 0x0100
@@ -608,7 +612,9 @@ struct airoha_qdma_fwd_desc {
 struct airoha_queue {
 	struct airoha_qdma_desc *desc;
 	uchar *rx_buf;
+	uchar *tx_buf;
 	u16 head;
+	bool pending;
 
 	int ndesc;
 };
@@ -2263,6 +2269,22 @@ static void airoha_recovery_lan_wait_power_down(void)
 		mdelay(min_down_ms - elapsed);
 }
 
+static int airoha_recovery_lan_phy_read_ctrl(struct airoha_eth *eth, int phy)
+{
+	int ctrl = -EIO;
+	int retry;
+
+	for (retry = 0; retry < AIROHA_RECOVERY_MDIO_RETRIES; retry++) {
+		ctrl = airoha_mdio_c22_read(eth, phy, MII_BMCR);
+		if (ctrl >= 0 && ctrl != 0xffff)
+			return ctrl;
+
+		udelay(AIROHA_RECOVERY_MDIO_RETRY_US);
+	}
+
+	return ctrl < 0 ? ctrl : -EIO;
+}
+
 static bool airoha_recovery_lan_phy_set_power(struct airoha_eth *eth, bool up)
 {
 	static const int lan_phy_addrs[] = { 9, 10 };
@@ -2277,17 +2299,22 @@ static bool airoha_recovery_lan_phy_set_power(struct airoha_eth *eth, bool up)
 
 	for (i = 0; i < ARRAY_SIZE(lan_phy_addrs); i++) {
 		int phy = lan_phy_addrs[i];
-		int ctrl = airoha_mdio_c22_read(eth, phy, MII_BMCR);
+		int ctrl = airoha_recovery_lan_phy_read_ctrl(eth, phy);
 		u16 new_ctrl;
 
-		if (ctrl < 0)
+		if (ctrl < 0) {
+			printf("airoha: recovery PHY %d BMCR read failed: %d\n",
+			       phy, ctrl);
 			continue;
+		}
 
 		if (up)
-			new_ctrl = (ctrl & ~BMCR_PDOWN) | BMCR_ANENABLE |
-				   BMCR_ANRESTART;
+			new_ctrl = (ctrl & ~(BMCR_RESET | BMCR_LOOPBACK |
+					     BMCR_PDOWN | BMCR_ISOLATE)) |
+				   BMCR_ANENABLE | BMCR_ANRESTART;
 		else
-			new_ctrl = ctrl | BMCR_PDOWN;
+			new_ctrl = (ctrl & ~(BMCR_RESET | BMCR_ANRESTART)) |
+				   BMCR_PDOWN;
 
 		if (new_ctrl == ctrl)
 			continue;
@@ -4616,6 +4643,12 @@ static int airoha_qdma_init_tx_queue(struct airoha_queue *q,
 	q->ndesc = size;
 	q->head = 0;
 
+	q->tx_buf = memalign(ARCH_DMA_MINALIGN, AIROHA_MAX_PACKET_SIZE);
+	if (!q->tx_buf)
+		return -ENOMEM;
+
+	memset(q->tx_buf, 0, AIROHA_MAX_PACKET_SIZE);
+
 	q->desc = dma_alloc_coherent(q->ndesc * sizeof(*q->desc), &dma_addr);
 	if (!q->desc)
 		return -ENOMEM;
@@ -4758,17 +4791,43 @@ static void airoha_qdma_sync_rx_head(struct airoha_qdma *qdma,
 		q->head = dma_idx;
 }
 
-static void airoha_qdma_stop_dma(struct airoha_qdma *qdma)
+static int airoha_qdma_stop_dma(struct airoha_qdma *qdma)
 {
 	u32 val;
+	int ret;
 
 	airoha_qdma_clear(qdma, REG_QDMA_GLOBAL_CFG,
 			  GLOBAL_CFG_TX_DMA_EN_MASK |
 				  GLOBAL_CFG_RX_DMA_EN_MASK);
-	read_poll_timeout(airoha_qdma_rr, val,
-			  !(val & (GLOBAL_CFG_TX_DMA_BUSY_MASK |
-				   GLOBAL_CFG_RX_DMA_BUSY_MASK)),
-			  10, 1000, qdma, REG_QDMA_GLOBAL_CFG);
+	ret = read_poll_timeout(airoha_qdma_rr, val,
+				!(val & (GLOBAL_CFG_TX_DMA_BUSY_MASK |
+					 GLOBAL_CFG_RX_DMA_BUSY_MASK)),
+				10, AIROHA_RECOVERY_QDMA_STOP_TIMEOUT_US,
+				qdma, REG_QDMA_GLOBAL_CFG);
+	if (ret)
+		printf("airoha: qdma%d did not stop, cfg=%08x\n",
+		       (int)(qdma - qdma->eth->qdma), val);
+
+	return ret;
+}
+
+static int airoha_qdma_wait_tx_done(struct airoha_qdma_desc *desc)
+{
+	int elapsed;
+
+	for (elapsed = 0; elapsed < AIROHA_RECOVERY_TX_TIMEOUT_US; elapsed++) {
+		u32 ctrl;
+
+		dma_unmap_unaligned(virt_to_phys(desc), sizeof(*desc),
+				    DMA_FROM_DEVICE);
+		ctrl = le32_to_cpu(READ_ONCE(desc->ctrl));
+		if (ctrl & QDMA_DESC_DONE_MASK)
+			return 0;
+
+		udelay(1);
+	}
+
+	return -ETIMEDOUT;
 }
 
 static void airoha_qdma_reset_tx_ring(struct airoha_qdma *qdma, int qid)
@@ -4779,6 +4838,7 @@ static void airoha_qdma_reset_tx_ring(struct airoha_qdma *qdma, int qid)
 		return;
 
 	q->head = 0;
+	q->pending = false;
 	memset(q->desc, 0, q->ndesc * sizeof(*q->desc));
 	dma_map_single(q->desc, q->ndesc * sizeof(*q->desc), DMA_TO_DEVICE);
 	airoha_qdma_rmw(qdma, REG_TX_CPU_IDX(qid), TX_RING_CPU_IDX_MASK, 0);
@@ -4799,11 +4859,14 @@ static void airoha_qdma_reset_rx_ring(struct airoha_qdma *qdma, int qid)
 	airoha_qdma_rmw(qdma, REG_RX_DMA_IDX(qid), RX_RING_DMA_IDX_MASK, 0);
 }
 
-static void airoha_qdma_runtime_reset(struct airoha_qdma *qdma)
+static int airoha_qdma_runtime_reset(struct airoha_qdma *qdma)
 {
+	int ret;
 	int i;
 
-	airoha_qdma_stop_dma(qdma);
+	ret = airoha_qdma_stop_dma(qdma);
+	if (ret)
+		return ret;
 
 	for (i = 0; i < 2; i++)
 		airoha_qdma_wr(qdma, REG_INT_STATUS(i), 0xffffffff);
@@ -4817,7 +4880,7 @@ static void airoha_qdma_runtime_reset(struct airoha_qdma *qdma)
 				  RX_DELAY_INT_MASK);
 	}
 
-	airoha_qdma_hw_init(qdma);
+	return airoha_qdma_hw_init(qdma);
 }
 
 static int airoha_qdma_init(struct udevice *dev, struct airoha_eth *eth,
@@ -5199,17 +5262,26 @@ static int airoha_eth_probe(struct udevice *dev)
 static int airoha_eth_init(struct udevice *dev)
 {
 	struct airoha_eth *eth = dev_get_priv(dev);
-	int i, qid;
+	int i, qid, ret;
 
 	airoha_recovery_runtime_reset(eth);
 	airoha_switch_recovery_quiesce(eth);
+	airoha_fe_recovery_runtime_stop(eth);
 	airoha_recovery_lan_phy_set_power(eth, false);
+
+	for (i = 0; i < AIROHA_MAX_NUM_QDMA; i++) {
+		struct airoha_qdma *qdma = &eth->qdma[i];
+
+		if (!airoha_qdma_ready(qdma))
+			continue;
+
+		ret = airoha_qdma_runtime_reset(qdma);
+		if (ret)
+			return ret;
+	}
+
 	airoha_fe_recovery_runtime_init(eth);
 	arht_eth_write_hwaddr(dev);
-	airoha_recovery_lan_phy_set_power(eth, true);
-	airoha_switch_recovery_runtime_init(eth);
-	airoha_switch_fdb_flush(eth);
-	airoha_gdm4_recovery_prime(eth);
 	qid = 0;
 
 	for (i = 0; i < AIROHA_MAX_NUM_QDMA; i++) {
@@ -5219,7 +5291,6 @@ static int airoha_eth_init(struct udevice *dev)
 		if (!airoha_qdma_ready(qdma))
 			continue;
 
-		airoha_qdma_runtime_reset(qdma);
 		q = &qdma->q_rx[qid];
 		airoha_qdma_set(qdma, REG_QDMA_GLOBAL_CFG,
 				GLOBAL_CFG_TX_DMA_EN_MASK |
@@ -5234,6 +5305,10 @@ static int airoha_eth_init(struct udevice *dev)
 		airoha_qdma_sync_rx_head(qdma, q, qid);
 	}
 
+	airoha_recovery_lan_phy_set_power(eth, true);
+	airoha_switch_recovery_runtime_init(eth);
+	airoha_gdm4_recovery_prime(eth);
+
 	return 0;
 }
 
@@ -5241,6 +5316,10 @@ static void airoha_eth_stop(struct udevice *dev)
 {
 	struct airoha_eth *eth = dev_get_priv(dev);
 	int i;
+
+	/* Block new ingress before waiting for the DMA engines to drain. */
+	airoha_switch_recovery_quiesce(eth);
+	airoha_fe_recovery_runtime_stop(eth);
 
 	for (i = 0; i < AIROHA_MAX_NUM_QDMA; i++) {
 		struct airoha_qdma *qdma = &eth->qdma[i];
@@ -5251,8 +5330,6 @@ static void airoha_eth_stop(struct udevice *dev)
 		airoha_qdma_stop_dma(qdma);
 	}
 
-	airoha_switch_recovery_quiesce(eth);
-	airoha_fe_recovery_runtime_stop(eth);
 	airoha_recovery_lan_phy_set_power(eth, false);
 	airoha_recovery_runtime_reset(eth);
 }
@@ -5268,10 +5345,8 @@ static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 	u32 msg0, msg1;
 	int qid, index;
 	u32 val;
-	int i;
-	void *tx_packet = packet;
-	int tx_length = length;
-	uchar padded_packet[60] __aligned(ARCH_DMA_MINALIGN);
+	int ret;
+	int tx_length;
 
 	/*
 	 * Linux relies on GDM_PAD_EN for short frames, but for the XR1710G 10G
@@ -5279,22 +5354,20 @@ static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 	 * RX starts working. Manually pad runt frames to 60 bytes so we can rule
 	 * out any GDM4/XFI path issue around automatic short-frame padding.
 	 */
-	if (length < 60) {
-		memset(padded_packet, 0, sizeof(padded_packet));
-		memcpy(padded_packet, packet, length);
-		tx_packet = padded_packet;
-		tx_length = sizeof(padded_packet);
-	}
+	if (length <= 0)
+		return -EINVAL;
+	if (length > AIROHA_MAX_PACKET_SIZE)
+		return -EMSGSIZE;
 
-	dma_addr = dma_map_single(tx_packet, tx_length, DMA_TO_DEVICE);
+	tx_length = max(length, 60);
 
 	eth->last_tx_fport = fport;
 	eth->last_tx_len = tx_length;
 	eth->last_tx_ret = -EINPROGRESS;
 	eth->last_tx_hw_fport = airoha_encode_tx_fport(fport);
 	eth->tx_attempts++;
-	if (tx_length >= ETH_HLEN) {
-		const u8 *eth_hdr = tx_packet;
+	if (length >= ETH_HLEN) {
+		const u8 *eth_hdr = packet;
 
 		memcpy(eth->last_tx_dst, eth_hdr, ARP_HLEN);
 		memcpy(eth->last_tx_src, eth_hdr + ARP_HLEN, ARP_HLEN);
@@ -5310,7 +5383,24 @@ static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 	qid = airoha_recovery_tx_qid(eth, fport);
 	q = &qdma->q_tx[qid];
 	desc = &q->desc[q->head];
+	if (q->pending) {
+		ret = airoha_qdma_wait_tx_done(desc);
+		if (ret) {
+			eth->last_tx_ret = ret;
+			eth->tx_err++;
+			return ret;
+		}
+
+		q->pending = false;
+		q->head = (q->head + 1) % q->ndesc;
+		airoha_qdma_rmw(qdma, REG_IRQ_CLEAR_LEN(0), IRQ_CLEAR_LEN_MASK, 1);
+		desc = &q->desc[q->head];
+	}
 	index = (q->head + 1) % q->ndesc;
+	memcpy(q->tx_buf, packet, length);
+	if (tx_length > length)
+		memset(q->tx_buf + length, 0, tx_length - length);
+	dma_addr = dma_map_single(q->tx_buf, tx_length, DMA_TO_DEVICE);
 
 	msg0 = airoha_recovery_tx_msg0(qid);
 	msg1 = FIELD_PREP(QDMA_ETH_TXMSG_FPORT_MASK,
@@ -5327,26 +5417,19 @@ static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 	WRITE_ONCE(desc->msg2, cpu_to_le32(0xffff));
 
 	dma_map_unaligned(desc, sizeof(*desc), DMA_TO_DEVICE);
+	q->pending = true;
 
 	airoha_qdma_rmw(qdma, REG_TX_CPU_IDX(qid), TX_RING_CPU_IDX_MASK,
 			FIELD_PREP(TX_RING_CPU_IDX_MASK, index));
 
-	for (i = 0; i < 100; i++) {
-		dma_unmap_unaligned(virt_to_phys(desc), sizeof(*desc),
-				    DMA_FROM_DEVICE);
-		if (desc->ctrl & QDMA_DESC_DONE_MASK)
-			break;
-
-		udelay(1);
-	}
-
-	/* Return error if for some reason the descriptor never ACK */
-	if (!(desc->ctrl & QDMA_DESC_DONE_MASK)) {
-		eth->last_tx_ret = -EAGAIN;
+	ret = airoha_qdma_wait_tx_done(desc);
+	if (ret) {
+		eth->last_tx_ret = ret;
 		eth->tx_err++;
-		return -EAGAIN;
+		return ret;
 	}
 
+	q->pending = false;
 	q->head = index;
 	airoha_qdma_rmw(qdma, REG_IRQ_CLEAR_LEN(0), IRQ_CLEAR_LEN_MASK, 1);
 
@@ -5478,7 +5561,6 @@ static int airoha_eth_recv_qdma(struct airoha_eth *eth, struct airoha_qdma *qdma
 	u32 desc_ctrl, msg1;
 	u8 qdma_id = qdma - &eth->qdma[0];
 	u8 sport, crsn;
-	u8 old_rx_fport;
 	u16 ppe_entry, length;
 	uchar *packet;
 	int qid;
@@ -5524,10 +5606,7 @@ static int airoha_eth_recv_qdma(struct airoha_eth *eth, struct airoha_qdma *qdma
 	 * EN7581 reports GDM4 traffic as SPORT 0x18 in RX metadata,
 	 * while GDM2 still comes back as SPORT 0x2.
 	 */
-	old_rx_fport = eth->last_rx_fport;
 	eth->last_rx_fport = airoha_rx_sport_to_recovery_fport(eth, sport);
-	airoha_recovery_flush_fdb_on_port_move(eth, old_rx_fport,
-					       eth->last_rx_fport, "rx");
 	if (!eth->last_rx_fport)
 		airoha_pick_tx_fport(eth);
 	else if (eth->last_rx_fport == 1)
