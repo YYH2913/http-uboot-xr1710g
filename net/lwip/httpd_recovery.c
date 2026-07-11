@@ -783,6 +783,11 @@ static void recovery_status_led_poll(struct recovery_status_led_ctrl *ctrl)
 	}
 }
 
+static void recovery_status_led_service(void *arg)
+{
+	recovery_status_led_poll(arg);
+}
+
 static void recovery_status_led_stop(struct recovery_status_led_ctrl *ctrl)
 {
 	int i;
@@ -3003,6 +3008,8 @@ int run_http_recovery(void)
 	}
 	printf("HTTP recovery server listening on http://%s/\n",
 	       ip4addr_ntoa(netif_ip4_addr(netif)));
+	if (use_status_leds)
+		net_lwip_set_recovery_poll_hook(recovery_status_led_service, &status_leds);
 
 	while (1) {
 		if (tstc()) {
@@ -3037,6 +3044,7 @@ int run_http_recovery(void)
 		WATCHDOG_RESET();
 	}
 
+	net_lwip_set_recovery_poll_hook(NULL, NULL);
 	recovery_cancel_timeouts();
 	recovery_dhcp_server_stop(&dhcp);
 	net_lwip_set_recovery_dhcp_hook(NULL, NULL);
