@@ -2973,7 +2973,7 @@ int run_http_recovery(void)
 		recovery_status_led_release(&status_leds);
 		recovery_led_stop(&leds);
 		recovery_led_ctrl_free(&leds);
-		eth_halt();
+		net_lwip_eth_stop();
 		return -ENODEV;
 	}
 
@@ -2984,7 +2984,7 @@ int run_http_recovery(void)
 		recovery_status_led_release(&status_leds);
 		recovery_led_stop(&leds);
 		recovery_led_ctrl_free(&leds);
-		eth_halt();
+		net_lwip_eth_stop();
 		return -ENODEV;
 	}
 
@@ -3039,7 +3039,7 @@ int run_http_recovery(void)
 	net_lwip_set_recovery_dhcp_hook(NULL, NULL);
 	recovery_lwip_cleanup(netif);
 	net_lwip_remove_netif(netif);
-	eth_halt();
+	net_lwip_eth_stop();
 	recovery_status_led_stop(&status_leds);
 	recovery_status_led_release(&status_leds);
 	recovery_led_stop(&leds);

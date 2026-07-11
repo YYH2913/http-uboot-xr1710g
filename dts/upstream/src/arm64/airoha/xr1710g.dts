@@ -161,54 +161,53 @@
 			read-only;
 		};
 
-				partition@700000 {
-					label = "ubi";
-					reg = <0x00700000 0x1d9c0000>;
-					compatible = "linux,ubi";
+		partition@700000 {
+			label = "ubi";
+			reg = <0x00700000 0x1b700000>;
+			compatible = "linux,ubi";
 
-				volumes {
-					ubi-volume-ubootenv {
-						volname = "ubootenv";
+			volumes {
+				ubi-volume-ubootenv {
+					volname = "ubootenv";
 
 					nvmem-layout {
 						compatible = "u-boot,env-redundant-bool";
 					};
 				};
 
-					ubi-volume-ubootenv2 {
-						volname = "ubootenv2";
+				ubi-volume-ubootenv2 {
+					volname = "ubootenv2";
 
-						nvmem-layout {
-							compatible = "u-boot,env-redundant-bool";
-						};
+					nvmem-layout {
+						compatible = "u-boot,env-redundant-bool";
 					};
+				};
 
-					ubi-volume-uboot {
-						volname = "uboot";
-					};
+				ubi-volume-uboot {
+					volname = "uboot";
+				};
 
-					ubi_rootfs: ubi-volume-fit {
-						volname = "fit";
-					};
+				ubi_rootfs: ubi-volume-fit {
+					volname = "fit";
+				};
 
-					ubi_factory: ubi-volume-factory {
-						volname = "factory";
-					};
+				ubi_factory: ubi-volume-factory {
+					volname = "factory";
 				};
 			};
+		};
 
-				/*
-				 * Reserve the final 250 eraseblocks for the stock
-				 * bootloader's BMT/BBT handling on the 512 MiB
-				 * SPI-NAND.
-				 */
-				reserved_bmt@1e0c0000 {
-					label = "reserved_bmt";
-					reg = <0x1e0c0000 0x01f40000>;
-					read-only;
-				};
+		/*
+		 * Reserve the final 528 128 KiB eraseblocks (66 MiB) for
+		 * the vendor bootloader's BMT/BBT handling on SPI-NAND.
+		 */
+		reserved_bmt@1be00000 {
+			label = "reserved_bmt";
+			reg = <0x1be00000 0x04200000>;
+			read-only;
 		};
 	};
+};
 
 &ubi_factory {
 	nvmem-layout {

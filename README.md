@@ -391,8 +391,8 @@ The current flash partition layout is:
 |---|---:|---:|---:|
 | `vendor` | `0x00000000` | `0x00600000` | `0x005FFFFF` |
 | `chainloader` | `0x00600000` | `0x00100000` | `0x006FFFFF` |
-| `ubi` | `0x00700000` | `0x1D9C0000` | `0x1E0BFFFF` |
-| `reserved_bmt` | `0x1E0C0000` | `0x01F40000` | `0x1FFFFFFF` |
+| `ubi` | `0x00700000` | `0x1B700000` | `0x1BDFFFFF` |
+| `reserved_bmt` | `0x1BE00000` | `0x04200000` | `0x1FFFFFFF` |
 
 Inside `vendor`, the original vendor layout is still preserved:
 
@@ -400,7 +400,9 @@ Inside `vendor`, the original vendor layout is still preserved:
 - `uenv`: `0x00200000-0x003FFFFF`
 - `dsd`: `0x00400000-0x005FFFFF`
 
-This layout matches the current OP mainline layout.
+This layout matches the current OP mainline layout. Because the `ubi`
+partition is smaller than in the previous layout, migration must fully rebuild
+UBI; flashing only the `fit`/sysupgrade volume is not sufficient or safe.
 In the OpenWrt tree, the upstream XR1710G DTS added by OpenWrt PR `#22397`
 uses the same partition model as the local U-Boot/OpenWrt tree for
 `vendor`, `chainloader`, `ubi`, and `reserved_bmt`.

@@ -260,7 +260,7 @@
 #define AIROHA_RECOVERY_FDB_MOVE_FLUSH_MS 500
 #define AIROHA_RECOVERY_MDIO_RETRIES 3
 #define AIROHA_RECOVERY_MDIO_RETRY_US 1000
-#define AIROHA_RECOVERY_QDMA_STOP_TIMEOUT_US 10000
+#define AIROHA_RECOVERY_QDMA_STOP_TIMEOUT_US 50000
 #define AIROHA_RECOVERY_TX_TIMEOUT_US 5000
 
 /* FE */
@@ -1790,58 +1790,34 @@ static int airoha_env_override_bool(const char *name, bool *value)
 
 static bool airoha_gdm4_use_cdm2(struct airoha_eth *eth)
 {
-	const char *use_cdm2 = env_get("gdm4_cdm2");
+	bool use_cdm2 = false;
 
 	(void)eth;
 
 	/*
-	 * Linux can bind GDM4 to CDM2/QDMA1, but this recovery driver still
-	 * only programs the reduced CDM1/QDMA0 RX path end-to-end. Do not
-	 * implicitly flip 10G recovery to CDM2 unless explicitly requested,
-	 * otherwise TX moves to QDMA1 while RX keeps depending on the CDM1
-	 * recovery setup and packets never make it back to the CPU.
+	 * Keep recovery on the CDM1/QDMA0 datapath by default. The optional
+	 * CDM2/QDMA1 path is experimental and must be enabled explicitly with
+	 * gdm4_cdm2; enabling GDM4 loopback alone must not select QDMA1.
 	 */
-	if (use_cdm2) {
-		if (!strcmp(use_cdm2, "0") || !strcmp(use_cdm2, "off") ||
-		    !strcmp(use_cdm2, "disable"))
-			return false;
-		if (!strcmp(use_cdm2, "1") || !strcmp(use_cdm2, "on") ||
-		    !strcmp(use_cdm2, "enable"))
-			return true;
-	}
+	airoha_env_override_bool("gdm4_cdm2", &use_cdm2);
 
-	/*
-	 * Once 10G recovery is using the upstream-like GDM2 loopback path,
-	 * keep the FE/QDMA side aligned with that topology and default to the
-	 * CDM2/QDMA1 datapath as well.
-	 */
-	if (airoha_gdm4_loopback_enabled(eth))
-		return true;
-
-	return false;
+	return use_cdm2;
 }
 
 static bool airoha_gdm4_loopback_enabled(struct airoha_eth *eth)
 {
-	const char *loopback = env_get("gdm4_loopback");
+	bool loopback = false;
 
-	if (loopback) {
-		if (!strcmp(loopback, "0") || !strcmp(loopback, "off") ||
-		    !strcmp(loopback, "disable"))
-			return false;
-		if (!strcmp(loopback, "1") || !strcmp(loopback, "on") ||
-		    !strcmp(loopback, "enable"))
-			return true;
-	}
+	(void)eth;
 
 	/*
-	 * The direct GDM4 TX path can complete QDMA descriptors and increment
-	 * GDM4 counters while the peer still sees no usable frames. Match the
-	 * upstream EN7581 external-serdes topology by default: route GDM2
-	 * loopback into GDM4 and use CDM2/QDMA1 for the 10G CPU path.
-	 * Set gdm4_loopback=0 to force the older direct-GDM4 recovery path.
+	 * GDM2-to-GDM4 loopback is an optional 10G experiment. Keep it disabled
+	 * for normal recovery unless gdm4_loopback is explicitly enabled; the
+	 * CDM2/QDMA1 selection remains separately controlled by gdm4_cdm2.
 	 */
-	return true;
+	airoha_env_override_bool("gdm4_loopback", &loopback);
+
+	return loopback;
 }
 
 static void airoha_gdm4_update_loopback(struct airoha_eth *eth)
@@ -4791,7 +4767,7 @@ static void airoha_qdma_sync_rx_head(struct airoha_qdma *qdma,
 		q->head = dma_idx;
 }
 
-static int airoha_qdma_stop_dma(struct airoha_qdma *qdma)
+static void airoha_qdma_stop_dma(struct airoha_qdma *qdma)
 {
 	u32 val;
 	int ret;
@@ -4799,16 +4775,19 @@ static int airoha_qdma_stop_dma(struct airoha_qdma *qdma)
 	airoha_qdma_clear(qdma, REG_QDMA_GLOBAL_CFG,
 			  GLOBAL_CFG_TX_DMA_EN_MASK |
 				  GLOBAL_CFG_RX_DMA_EN_MASK);
+	/*
+	 * On EN7581 RX_BUSY may remain asserted after both DMA enable bits are
+	 * cleared. Linux upstream treats this condition as a warning and still
+	 * continues the queue teardown/reset sequence.
+	 */
 	ret = read_poll_timeout(airoha_qdma_rr, val,
 				!(val & (GLOBAL_CFG_TX_DMA_BUSY_MASK |
 					 GLOBAL_CFG_RX_DMA_BUSY_MASK)),
 				10, AIROHA_RECOVERY_QDMA_STOP_TIMEOUT_US,
 				qdma, REG_QDMA_GLOBAL_CFG);
 	if (ret)
-		printf("airoha: qdma%d did not stop, cfg=%08x\n",
+		printf("WARNING: airoha: qdma%d stop timed out, cfg=%08x\n",
 		       (int)(qdma - qdma->eth->qdma), val);
-
-	return ret;
 }
 
 static int airoha_qdma_wait_tx_done(struct airoha_qdma_desc *desc)
@@ -4861,12 +4840,9 @@ static void airoha_qdma_reset_rx_ring(struct airoha_qdma *qdma, int qid)
 
 static int airoha_qdma_runtime_reset(struct airoha_qdma *qdma)
 {
-	int ret;
 	int i;
 
-	ret = airoha_qdma_stop_dma(qdma);
-	if (ret)
-		return ret;
+	airoha_qdma_stop_dma(qdma);
 
 	for (i = 0; i < 2; i++)
 		airoha_qdma_wr(qdma, REG_INT_STATUS(i), 0xffffffff);
