@@ -104,13 +104,10 @@ ulong airoha_recovery_get_lan_activity_ms(void);
 #define RECOVERY_REG_GPIO_FLASH_MODE_CFG_EXT 0x0068
 #define RECOVERY_REG_GPIO_FLASH_PRD_SET0 0x003c
 #define RECOVERY_REG_GPIO_FLASH_MAP0     0x004c
+#define RECOVERY_REG_GPIO_FLASH_MAP1     0x0050
 #define RECOVERY_REG_CYCLE_CFG_VALUE0    0x0098
 
-#define RECOVERY_GPIO_PWM_BUCKETS          8
-#define RECOVERY_GPIO_PWM_BUCKETS_PER_DUTY 2
-#define RECOVERY_GPIO_PWM_BUCKETS_PER_CYCLE 4
-#define RECOVERY_GPIO_PWM_CHANNELS_PER_MAP 8
-#define RECOVERY_GPIO_PWM_MAP_ENABLE       BIT(3)
+#define RECOVERY_GPIO_FLASH_MAP_BUCKET0  0x88888888
 #define RECOVERY_GPIO_FLASH_DUTY_FULL    255
 
 #define RECOVERY_GPIO_LAN0_LED0_MODE_MASK BIT(3)
@@ -252,11 +249,10 @@ struct recovery_status_led_ctrl {
 	ulong last_pwm_update;
 	u32 pwm_mux_mask;
 	u32 pwm_mux_mask_ext;
-	u32 saved_pwm_duty[RECOVERY_GPIO_PWM_BUCKETS /
-			   RECOVERY_GPIO_PWM_BUCKETS_PER_DUTY];
+	u32 saved_pwm_duty;
 	u32 saved_pwm_map[2];
-	u32 saved_pwm_cycle[RECOVERY_GPIO_PWM_BUCKETS /
-			    RECOVERY_GPIO_PWM_BUCKETS_PER_CYCLE];
+	u32 saved_pwm_cycle;
+	bool pwm_active_low;
 	bool hw_pwm;
 };
 
@@ -485,73 +481,38 @@ static int recovery_status_led_request(struct recovery_gpio_pin *pin)
 	return 0;
 }
 
-static int recovery_status_led_pwm_channel(u8 gpio)
-{
-	if (gpio <= 15)
-		return gpio;
-	if (gpio >= 16 && gpio <= 31)
-		return gpio - 16;
-	if (gpio >= 36 && gpio <= 51)
-		return gpio - 36;
-
-	return -EINVAL;
-}
-
-static u32 recovery_pwm_read(u32 reg, int index)
-{
-	uintptr_t addr = RECOVERY_GPIO_SYSCTL_BASE + reg + 4 * index;
-
-	return readl((void __iomem *)addr);
-}
-
-static void recovery_pwm_write(u32 reg, int index, u32 value)
-{
-	uintptr_t addr = RECOVERY_GPIO_SYSCTL_BASE + reg + 4 * index;
-
-	writel(value, (void __iomem *)addr);
-}
-
 static void recovery_status_led_hw_pwm_set(struct recovery_status_led_ctrl *ctrl,
-					   int bucket, u32 brightness_fp)
+					   u32 brightness_fp)
 {
-	u32 high_ticks, offset, shift, value;
+	u32 high_ticks, value;
 
 	high_ticks = (brightness_fp * RECOVERY_GPIO_FLASH_DUTY_FULL +
 		      RECOVERY_STATUS_BRIGHTNESS_FP / 2) /
 		     RECOVERY_STATUS_BRIGHTNESS_FP;
-	if (ctrl->leds[bucket].active_low)
+	if (ctrl->pwm_active_low)
 		high_ticks = RECOVERY_GPIO_FLASH_DUTY_FULL - high_ticks;
 
 	value = ((RECOVERY_GPIO_FLASH_DUTY_FULL - high_ticks) << 8) |
 		high_ticks;
-	offset = bucket / RECOVERY_GPIO_PWM_BUCKETS_PER_DUTY;
-	shift = 16 * (bucket % RECOVERY_GPIO_PWM_BUCKETS_PER_DUTY);
 	recovery_clrsetbits_le32(RECOVERY_GPIO_SYSCTL_BASE +
-				 RECOVERY_REG_GPIO_FLASH_PRD_SET0 + 4 * offset,
-				 GENMASK(15, 0) << shift, value << shift);
+				 RECOVERY_REG_GPIO_FLASH_PRD_SET0,
+				 GENMASK(15, 0), value);
 }
 
 static int recovery_status_led_hw_pwm_init(struct recovery_status_led_ctrl *ctrl)
 {
-	u32 map[ARRAY_SIZE(ctrl->saved_pwm_map)];
 	u32 flash_mode, flash_mode_ext;
-	u32 channels = 0;
-	int i, j;
+	int i;
 
-	if (ctrl->led_count > RECOVERY_GPIO_PWM_BUCKETS)
-		return -ENOSPC;
-
+	ctrl->pwm_active_low = ctrl->leds[0].active_low;
 	for (i = 0; i < ctrl->led_count; i++) {
 		uintptr_t reg;
 		u32 mask;
-		int channel;
 
-		channel = recovery_status_led_pwm_channel(ctrl->leds[i].gpio);
-		if (channel < 0 || (channels & BIT(channel)) ||
+		if (ctrl->leds[i].active_low != ctrl->pwm_active_low ||
 		    !recovery_gpio_flash_mode_bit(ctrl->leds[i].gpio, &reg,
 						  &mask))
 			return -EOPNOTSUPP;
-		channels |= BIT(channel);
 
 		if (reg == RECOVERY_GPIO_SYSCTL_BASE +
 			   RECOVERY_REG_GPIO_FLASH_MODE_CFG)
@@ -568,40 +529,27 @@ static int recovery_status_led_hw_pwm_init(struct recovery_status_led_ctrl *ctrl
 	    (flash_mode_ext & ~ctrl->pwm_mux_mask_ext))
 		return -EBUSY;
 
-	for (i = 0; i < ARRAY_SIZE(ctrl->saved_pwm_duty); i++)
-		ctrl->saved_pwm_duty[i] =
-			recovery_pwm_read(RECOVERY_REG_GPIO_FLASH_PRD_SET0, i);
-	for (i = 0; i < ARRAY_SIZE(ctrl->saved_pwm_map); i++) {
-		ctrl->saved_pwm_map[i] =
-			recovery_pwm_read(RECOVERY_REG_GPIO_FLASH_MAP0, i);
-		map[i] = ctrl->saved_pwm_map[i];
-	}
-	for (i = 0; i < ARRAY_SIZE(ctrl->saved_pwm_cycle); i++)
-		ctrl->saved_pwm_cycle[i] =
-			recovery_pwm_read(RECOVERY_REG_CYCLE_CFG_VALUE0, i);
+	ctrl->saved_pwm_duty = readl((void __iomem *)(RECOVERY_GPIO_SYSCTL_BASE +
+						 RECOVERY_REG_GPIO_FLASH_PRD_SET0));
+	ctrl->saved_pwm_map[0] = readl((void __iomem *)(RECOVERY_GPIO_SYSCTL_BASE +
+						  RECOVERY_REG_GPIO_FLASH_MAP0));
+	ctrl->saved_pwm_map[1] = readl((void __iomem *)(RECOVERY_GPIO_SYSCTL_BASE +
+						  RECOVERY_REG_GPIO_FLASH_MAP1));
+	ctrl->saved_pwm_cycle = readl((void __iomem *)(RECOVERY_GPIO_SYSCTL_BASE +
+						  RECOVERY_REG_CYCLE_CFG_VALUE0));
 
-	for (i = 0; i < ctrl->led_count; i++) {
-		u32 map_offset, map_shift, cycle_offset, cycle_shift;
-		int channel = recovery_status_led_pwm_channel(ctrl->leds[i].gpio);
-
-		cycle_offset = i / RECOVERY_GPIO_PWM_BUCKETS_PER_CYCLE;
-		cycle_shift = 8 * (i % RECOVERY_GPIO_PWM_BUCKETS_PER_CYCLE);
-		recovery_clrsetbits_le32(RECOVERY_GPIO_SYSCTL_BASE +
-					 RECOVERY_REG_CYCLE_CFG_VALUE0 +
-					 4 * cycle_offset,
-					 GENMASK(7, 0) << cycle_shift,
-					 RECOVERY_STATUS_HW_PWM_PERIOD_TICKS <<
-					 cycle_shift);
-		recovery_status_led_hw_pwm_set(ctrl, i, 0);
-
-		map_offset = channel / RECOVERY_GPIO_PWM_CHANNELS_PER_MAP;
-		map_shift = 4 * (channel % RECOVERY_GPIO_PWM_CHANNELS_PER_MAP);
-		map[map_offset] &= ~(GENMASK(3, 0) << map_shift);
-		map[map_offset] |= (RECOVERY_GPIO_PWM_MAP_ENABLE | i) <<
-					  map_shift;
-	}
-	for (j = 0; j < ARRAY_SIZE(map); j++)
-		recovery_pwm_write(RECOVERY_REG_GPIO_FLASH_MAP0, j, map[j]);
+	recovery_clrsetbits_le32(RECOVERY_GPIO_SYSCTL_BASE +
+				 RECOVERY_REG_CYCLE_CFG_VALUE0,
+				 GENMASK(7, 0),
+				 RECOVERY_STATUS_HW_PWM_PERIOD_TICKS);
+	recovery_status_led_hw_pwm_set(ctrl, 0);
+	/* Extended PWM muxes use fixed GPIO0..15 channels; share one bucket. */
+	writel(RECOVERY_GPIO_FLASH_MAP_BUCKET0,
+	       (void __iomem *)(RECOVERY_GPIO_SYSCTL_BASE +
+				RECOVERY_REG_GPIO_FLASH_MAP0));
+	writel(RECOVERY_GPIO_FLASH_MAP_BUCKET0,
+	       (void __iomem *)(RECOVERY_GPIO_SYSCTL_BASE +
+				RECOVERY_REG_GPIO_FLASH_MAP1));
 	recovery_clrsetbits_le32(RECOVERY_GPIO_SYSCTL_BASE +
 				 RECOVERY_REG_GPIO_FLASH_MODE_CFG,
 				 0, ctrl->pwm_mux_mask);
@@ -618,8 +566,7 @@ static void recovery_status_led_hw_pwm_stop(struct recovery_status_led_ctrl *ctr
 {
 	int i;
 
-	for (i = 0; i < ctrl->led_count; i++)
-		recovery_status_led_hw_pwm_set(ctrl, i, 0);
+	recovery_status_led_hw_pwm_set(ctrl, 0);
 	recovery_clrsetbits_le32(RECOVERY_GPIO_SYSCTL_BASE +
 				 RECOVERY_REG_GPIO_FLASH_MODE_CFG,
 				 ctrl->pwm_mux_mask, 0);
@@ -627,15 +574,18 @@ static void recovery_status_led_hw_pwm_stop(struct recovery_status_led_ctrl *ctr
 				 RECOVERY_REG_GPIO_FLASH_MODE_CFG_EXT,
 				 ctrl->pwm_mux_mask_ext, 0);
 
-	for (i = 0; i < ARRAY_SIZE(ctrl->saved_pwm_map); i++)
-		recovery_pwm_write(RECOVERY_REG_GPIO_FLASH_MAP0, i,
-				   ctrl->saved_pwm_map[i]);
-	for (i = 0; i < ARRAY_SIZE(ctrl->saved_pwm_duty); i++)
-		recovery_pwm_write(RECOVERY_REG_GPIO_FLASH_PRD_SET0, i,
-				   ctrl->saved_pwm_duty[i]);
-	for (i = 0; i < ARRAY_SIZE(ctrl->saved_pwm_cycle); i++)
-		recovery_pwm_write(RECOVERY_REG_CYCLE_CFG_VALUE0, i,
-				   ctrl->saved_pwm_cycle[i]);
+	writel(ctrl->saved_pwm_map[0],
+	       (void __iomem *)(RECOVERY_GPIO_SYSCTL_BASE +
+				RECOVERY_REG_GPIO_FLASH_MAP0));
+	writel(ctrl->saved_pwm_map[1],
+	       (void __iomem *)(RECOVERY_GPIO_SYSCTL_BASE +
+				RECOVERY_REG_GPIO_FLASH_MAP1));
+	writel(ctrl->saved_pwm_duty,
+	       (void __iomem *)(RECOVERY_GPIO_SYSCTL_BASE +
+				RECOVERY_REG_GPIO_FLASH_PRD_SET0));
+	writel(ctrl->saved_pwm_cycle,
+	       (void __iomem *)(RECOVERY_GPIO_SYSCTL_BASE +
+				RECOVERY_REG_CYCLE_CFG_VALUE0));
 
 	ctrl->hw_pwm = false;
 	for (i = 0; i < ctrl->led_count; i++) {
@@ -663,7 +613,7 @@ static int recovery_status_led_init(struct recovery_status_led_ctrl *ctrl)
 		"led-upgrade",
 	};
 	ofnode leds, node;
-	int i, keep = 0, pwm_ret;
+	int i, keep = 0;
 
 	memset(ctrl, 0, sizeof(*ctrl));
 
@@ -714,10 +664,13 @@ static int recovery_status_led_init(struct recovery_status_led_ctrl *ctrl)
 	}
 
 	ctrl->start_ms = get_timer(0);
-	pwm_ret = recovery_status_led_hw_pwm_init(ctrl);
-	if (pwm_ret)
-		printf("Recovery status LED hardware PWM unavailable (%d), using GPIO PWM\n",
-		       pwm_ret);
+	if (ctrl->led_count == 1) {
+		int pwm_ret = recovery_status_led_hw_pwm_init(ctrl);
+
+		if (pwm_ret)
+			printf("Recovery status LED hardware PWM unavailable (%d), using GPIO PWM\n",
+			       pwm_ret);
+	}
 
 	printf("Recovery status LEDs:");
 	for (i = 0; i < ctrl->led_count; i++)
@@ -812,10 +765,8 @@ static void recovery_status_led_poll(struct recovery_status_led_ctrl *ctrl)
 			return;
 
 		ctrl->last_pwm_update = now;
-		for (i = 0; i < ctrl->led_count; i++) {
-			brightness_fp = recovery_status_led_brightness_fp(ctrl, i, elapsed);
-			recovery_status_led_hw_pwm_set(ctrl, i, brightness_fp);
-		}
+		recovery_status_led_hw_pwm_set(ctrl,
+					       recovery_status_led_breath_fp(elapsed));
 		return;
 	}
 
