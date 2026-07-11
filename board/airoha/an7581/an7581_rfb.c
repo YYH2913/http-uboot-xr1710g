@@ -273,9 +273,6 @@ static int xr1710g_create_ubi_volume(const char *name, size_t size)
 	if (!name || !*name)
 		return -EINVAL;
 
-	if (ubi_part(XR1710G_UBI_PART, NULL))
-		return -ENODEV;
-
 	ubi = ubi_get_device(0);
 	if (!ubi)
 		return -ENODEV;
@@ -310,9 +307,6 @@ static int xr1710g_resize_ubi_volume(const char *name, size_t size)
 	if (!name || !*name)
 		return -EINVAL;
 
-	if (ubi_part(XR1710G_UBI_PART, NULL))
-		return -ENODEV;
-
 	desc = ubi_open_volume_nm(0, name, UBI_EXCLUSIVE);
 	if (IS_ERR_OR_NULL(desc))
 		return IS_ERR(desc) ? PTR_ERR(desc) : -ENODEV;
@@ -337,9 +331,6 @@ static int xr1710g_ensure_ubi_volume(const char *name, size_t size)
 	if (!name || !*name)
 		return -EINVAL;
 
-	if (ubi_part(XR1710G_UBI_PART, NULL))
-		return -ENODEV;
-
 	desc = ubi_open_volume_nm(0, name, UBI_READWRITE);
 	if (IS_ERR_OR_NULL(desc)) {
 		ret = xr1710g_create_ubi_volume(name, size);
@@ -358,6 +349,21 @@ static int xr1710g_ensure_ubi_volume(const char *name, size_t size)
 	return xr1710g_resize_ubi_volume(name, size);
 }
 
+static int xr1710g_select_ubi(void)
+{
+	struct ubi_device *ubi;
+	bool selected = false;
+
+	ubi = ubi_get_device(0);
+	if (ubi) {
+		selected = ubi->mtd &&
+			   !strcmp(ubi->mtd->name, XR1710G_UBI_PART);
+		ubi_put_device(ubi);
+	}
+
+	return selected ? 0 : ubi_part(XR1710G_UBI_PART, NULL);
+}
+
 int xr1710g_sync_factory(void)
 {
 	u8 *src = NULL, *dst = NULL;
@@ -367,6 +373,13 @@ int xr1710g_sync_factory(void)
 
 	if (!xr1710g_is_compatible())
 		return 0;
+
+	ret = xr1710g_select_ubi();
+	if (ret) {
+		printf("XR1710G: skipping factory sync; UBI is unavailable: %d\n",
+		       ret);
+		return ret;
+	}
 
 	src = malloc(XR1710G_FACTORY_SIZE);
 	dst = malloc(XR1710G_FACTORY_SIZE);
@@ -393,12 +406,10 @@ int xr1710g_sync_factory(void)
 		goto out;
 	}
 
-	if (!ubi_part(XR1710G_UBI_PART, NULL)) {
-		ret = ubi_volume_read(XR1710G_FACTORY_VOL, (char *)dst, 0,
-				      XR1710G_FACTORY_SIZE);
-		if (!ret && !memcmp(src, dst, XR1710G_FACTORY_SIZE))
-			same = true;
-	}
+	ret = ubi_volume_read(XR1710G_FACTORY_VOL, (char *)dst, 0,
+			      XR1710G_FACTORY_SIZE);
+	if (!ret && !memcmp(src, dst, XR1710G_FACTORY_SIZE))
+		same = true;
 
 	if (same) {
 		ret = 0;

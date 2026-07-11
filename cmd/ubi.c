@@ -675,10 +675,8 @@ int ubi_part(const char *part_name, const char *vid_header_offset)
 	struct mtd_info *mtd;
 	int err;
 
-	if (ubi && ubi->mtd && !strcmp(ubi->mtd->name, part_name)) {
-		printf("UBI partition '%s' already selected\n", part_name);
+	if (ubi && ubi->mtd && !strcmp(ubi->mtd->name, part_name))
 		return 0;
-	}
 
 	ubi_detach();
 

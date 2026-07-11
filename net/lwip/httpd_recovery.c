@@ -143,6 +143,7 @@ static unsigned long long prog_erase_volume_base;
 static unsigned long long prog_erase_volume_bytes;
 static struct recovery_status_led_ctrl *prog_status_leds;
 static bool recovery_httpd_started;
+static int recovery_ubi_attach_error;
 
 static void recovery_abort_tcp_list(struct tcp_pcb **list)
 {
@@ -1416,6 +1417,33 @@ static const char *recovery_ubi_part(enum upload_target tgt)
 	return part ?: "ubi";
 }
 
+static int recovery_select_ubi(const char *part)
+{
+	struct ubi_device *ubi;
+	bool selected = false;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_CMD_UBI) || !IS_ENABLED(CONFIG_MTD_UBI))
+		return -ENODEV;
+
+	ubi = ubi_get_device(0);
+	if (ubi) {
+		selected = ubi->mtd && !strcmp(ubi->mtd->name, part);
+		ubi_put_device(ubi);
+	}
+	if (selected)
+		return 0;
+
+	if (recovery_ubi_attach_error)
+		return recovery_ubi_attach_error;
+
+	ret = ubi_part((char *)part, NULL);
+	if (ret)
+		recovery_ubi_attach_error = ret;
+
+	return ret;
+}
+
 static int recovery_try_ubi_target(enum upload_target tgt,
 				       struct recovery_target *target)
 {
@@ -1429,7 +1457,7 @@ static int recovery_try_ubi_target(enum upload_target tgt,
 	if (!volume)
 		volume = recovery_default_target(tgt);
 
-	if (ubi_part((char *)part, NULL)) {
+	if (recovery_select_ubi(part)) {
 		mtd_probe_devices();
 		mtd = get_mtd_device_nm(part);
 		if (IS_ERR_OR_NULL(mtd))
@@ -1906,7 +1934,10 @@ recovery_calc_rebuild_ubi_limit(struct recovery_target *target)
 	if (target->backend != RECOVERY_BACKEND_UBI)
 		return target->limit;
 
-	if (ubi_part((char *)target->ubi_part, NULL))
+	if (target->ubi_needs_format)
+		return target->limit;
+
+	if (recovery_select_ubi(target->ubi_part))
 		return target->limit;
 
 	ubi = ubi_get_device(0);
@@ -2006,7 +2037,7 @@ static int recovery_ensure_rootfs_data(struct recovery_target *target)
 	if (target->backend != RECOVERY_BACKEND_UBI)
 		return 0;
 
-	if (ubi_part((char *)target->ubi_part, NULL))
+	if (recovery_select_ubi(target->ubi_part))
 		return -ENODEV;
 
 	desc = ubi_open_volume_nm(0, "rootfs_data", UBI_READWRITE);
@@ -2043,7 +2074,7 @@ static int recovery_prepare_ubi_target(struct recovery_target *target,
 		return -EINVAL;
 
 	if (!target->ubi_needs_format)
-		return ubi_part((char *)target->ubi_part, NULL) ? -ENODEV : 0;
+		return recovery_select_ubi(target->ubi_part);
 
 	if (!target->mtd)
 		return -ENODEV;
@@ -2064,7 +2095,8 @@ static int recovery_prepare_ubi_target(struct recovery_target *target,
 	if (ret)
 		return ret;
 
-	ret = ubi_part((char *)target->ubi_part, NULL);
+	recovery_ubi_attach_error = 0;
+	ret = recovery_select_ubi(target->ubi_part);
 	if (ret)
 		return ret;
 
@@ -2121,7 +2153,7 @@ static int recovery_ensure_preserved_ubi_volumes(struct recovery_target *target)
 	if (target->backend != RECOVERY_BACKEND_UBI)
 		return 0;
 
-	if (ubi_part((char *)target->ubi_part, NULL))
+	if (recovery_select_ubi(target->ubi_part))
 		return -ENODEV;
 
 	ret = recovery_ensure_ubi_volume_named("ubootenv",
@@ -2166,7 +2198,7 @@ static int recovery_cleanup_ubi_firmware(struct recovery_target *target,
 	if (target->backend != RECOVERY_BACKEND_UBI)
 		return -EINVAL;
 
-	if (ubi_part((char *)target->ubi_part, NULL))
+	if (recovery_select_ubi(target->ubi_part))
 		return -ENODEV;
 
 	ubi = ubi_get_device(0);
@@ -2269,7 +2301,7 @@ static int recovery_write_ubi_target(struct recovery_target *target,
 	if (target->backend != RECOVERY_BACKEND_UBI)
 		return -EINVAL;
 
-	if (ubi_part((char *)target->ubi_part, NULL))
+	if (recovery_select_ubi(target->ubi_part))
 		return -ENODEV;
 
 	desc = ubi_open_volume_nm(0, target->name, UBI_READWRITE);
@@ -2349,7 +2381,7 @@ static int recovery_resize_ubi_target(struct recovery_target *target,
 	if (target->backend != RECOVERY_BACKEND_UBI)
 		return -EINVAL;
 
-	if (ubi_part((char *)target->ubi_part, NULL))
+	if (recovery_select_ubi(target->ubi_part))
 		return -ENODEV;
 
 	desc = ubi_open_volume_nm(0, target->name, UBI_EXCLUSIVE);
@@ -2389,7 +2421,7 @@ static int recovery_create_ubi_target(struct recovery_target *target,
 	if (target->backend != RECOVERY_BACKEND_UBI)
 		return -EINVAL;
 
-	if (ubi_part((char *)target->ubi_part, NULL))
+	if (recovery_select_ubi(target->ubi_part))
 		return -ENODEV;
 
 	ubi = ubi_get_device(0);
@@ -2880,7 +2912,6 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		prog_phase = 3;
 		if (current_target == TARGET_FIRMWARE)
 			xr1710g_sync_factory();
-		printf("Flashing complete.\n");
 		return 0;
 	}
 
@@ -2925,7 +2956,6 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	prog_phase = 3;
 	if (current_target == TARGET_FIRMWARE)
 		xr1710g_sync_factory();
-	printf("Flashing complete.\n");
 	return 0;
 }
 
@@ -2951,6 +2981,7 @@ int run_http_recovery(void)
 	prog_erase_total = 0;
 	prog_write_done = 0;
 	prog_write_total = 0;
+	recovery_ubi_attach_error = 0;
 	memset(&leds, 0, sizeof(leds));
 	rc = recovery_status_led_init(&status_leds);
 	if (!rc) {
