@@ -28,16 +28,40 @@ main OpenWrt firmware.
 7. Select the upload target:
    - `firmware` writes the OpenWrt-generated `*-sysupgrade.itb` to `ubi:fit`.
    - `uboot` writes `xr1710g-chainloader-slot.bin` to the raw chainloader slot.
-8. For a firmware upload, select the layout used by that image: `UBI 2.0`,
-   `UBI 1.5`, or `UBI 1.0`. The selected UBI partition is erased and rebuilt
-   during flashing; only replacing `fit` is not sufficient when layouts differ.
+8. For a firmware upload, select the layout encoded in that image's embedded
+   device tree: `UBI 2.0`, `UBI 1.5`, or `UBI 1.0`. The selector controls the
+   erase/rebuild boundary; it does not convert or patch the uploaded image.
 9. Full rebuild recreates `ubootenv`, `ubootenv2`, `fit`, and `rootfs_data`.
    Factory EEPROM and MAC data are restored from the vendor DSD region, while
    saved U-Boot environment values are reset.
+10. Do not select a layout based only on the currently detected flash layout.
+    The selection must match the new image. A mismatch can let U-Boot load the
+    kernel but leave Linux waiting indefinitely for `/dev/fit0`.
 
-HTTP Recovery page screenshot:
+Current HTTP Recovery page with the image-layout selector:
 
-![HTTP Recovery page screenshot](./image.png)
+![Current HTTP Recovery page with UBI layout selector](./image.png)
+
+To inspect an OpenWrt FIT before uploading it, extract its FDT and read the
+`ubi` partition size:
+
+```sh
+u-boot/tools/dumpimage -T flat_dt -p 1 -o /tmp/xr1710g.dtb firmware.itb
+dtc -I dtb -O dts /tmp/xr1710g.dtb | grep -A2 'label = "ubi"'
+```
+
+Choose the WebUI value that matches the second `reg` cell:
+
+| Embedded FDT `ubi` reg | WebUI selection |
+|---|---|
+| `<0x00700000 0x1b700000>` | `UBI 2.0` |
+| `<0x00700000 0x1d9c0000>` | `UBI 1.5` |
+| `<0x00700000 0x1f700000>` | `UBI 1.0` |
+
+For example, if Linux prints an `ubi` end address of `0x1e0c0000`, the image
+is `UBI 1.5`; rebuild it with `UBI 1.5`, even if U-Boot previously detected or
+created a 1.0 layout. The characteristic failure is `not enough PEBs` followed
+by `Waiting for root device /dev/fit0`.
 
 Latest verified multi-layout recovery build (`ab7fd651`, 2026-07-12):
 
@@ -54,7 +78,8 @@ The artifact name contains the source commit used by the embedded U-Boot:
 `U-Boot 2026.07-00760-gab7fd65100f1`.
 
 Do not upload `u-boot.bin`, `u-boot.img`, or `xr1710g-ubi.img` through HTTP
-Recovery. Use `xr1710g-chainloader-slot.bin` only with the `uboot` target.
+Recovery. Use the named `*-flash-slot.bin` artifact (or the generic build
+output `xr1710g-chainloader-slot.bin`) only with the `uboot` target.
 
 > [!WARNING]
 > - Do not flash `u-boot.bin` directly.
@@ -178,6 +203,9 @@ path to write the actual image.
   An intermediate FIT-packaged artifact. It is usually not written to flash directly.
 - `out/xr1710g-chainloader-slot.bin`
   The image that is actually written to the `chainloader` partition.
+- `../build-artifacts/xr1710g-YYYYMMDD/*-flash-slot.bin`
+  Archived, commit-named copies of the verified flashable slot image. Prefer
+  the exact latest path listed in the flashing summary above.
 
 Upstream reference:
 
@@ -422,6 +450,12 @@ the local OP integration. Migration between versions must fully rebuild UBI;
 flashing only the `fit`/sysupgrade volume is not sufficient or safe. OpenWrt
 PR `#22397` is still unmerged and currently carries the older 16-PEB boundary;
 it is not evidence for the local `UBI 2.0` size.
+
+The WebUI layout choice must match the partition size in the uploaded FIT's
+embedded FDT, not merely this U-Boot's current MTD view. U-Boot can read a
+`fit` volume from a larger layout while the Linux DTS exposes a smaller MTD
+partition; Linux then rejects the UBI volume table because its reserved PEB
+count exceeds the DTS-defined partition.
 
 </details>
 

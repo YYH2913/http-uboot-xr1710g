@@ -411,7 +411,8 @@ button,input,select{font:inherit;letter-spacing:0}
             <strong>Important</strong>
             <ul id='notice-list'>
               <li>Do not power off the device during recovery.</li>
-              <li>Firmware recovery rebuilds rootfs_data and other non-preserved UBI volumes.</li>
+              <li>The selected UBI partition is fully erased and rebuilt.</li>
+              <li>The selection must match the image's embedded device tree.</li>
               <li>The device restarts automatically when recovery completes.</li>
             </ul>
           </aside>
@@ -440,7 +441,7 @@ var profiles={
 	    preserve:'Factory data is restored from DSD; saved U-Boot environment is reset',
 	    help:'Firmware images must be at least 1 MiB',
 	    action:'Upload and Recover',
-	    notices:['Do not power off the device during recovery.','The selected UBI partition is fully erased and rebuilt.','The image and chainloader must use the same UBI layout version.','The device restarts automatically when recovery completes.']
+	    notices:['Do not power off the device during recovery.','The selected UBI partition is fully erased and rebuilt.','The selection must match the image\'s embedded device tree.','The device restarts automatically when recovery completes.']
   },
   uboot:{
     title:'Update U-Boot',
