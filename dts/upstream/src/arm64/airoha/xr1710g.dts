@@ -198,6 +198,21 @@
 		};
 
 		/*
+		 * Compatibility views for older XR1710G UBI layouts. All three
+		 * partitions start at the same offset; software must select exactly
+		 * one view before attaching UBI.
+		 */
+		partition-ubi15@700000 {
+			label = "ubi1.5";
+			reg = <0x00700000 0x1d9c0000>;
+		};
+
+		partition-ubi10@700000 {
+			label = "ubi1.0";
+			reg = <0x00700000 0x1f700000>;
+		};
+
+		/*
 		 * Reserve the final 528 128 KiB eraseblocks (66 MiB) for
 		 * the vendor bootloader's BMT/BBT handling on SPI-NAND.
 		 */

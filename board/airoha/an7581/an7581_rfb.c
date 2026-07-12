@@ -46,6 +46,22 @@ DECLARE_GLOBAL_DATA_PTR;
 #define XR1710G_FACTORY_LAN_MAC_OFFSET	0x6000
 #define XR1710G_FACTORY_SIZE		(XR1710G_FACTORY_LAN_MAC_OFFSET + ARP_HLEN)
 
+struct xr1710g_ubi_layout {
+	const char *version;
+	const char *part;
+};
+
+static const struct xr1710g_ubi_layout xr1710g_ubi_layouts[] = {
+	{ "2.0", XR1710G_UBI_PART },
+	{ "1.5", "ubi1.5" },
+	{ "1.0", "ubi1.0" },
+};
+
+static const struct xr1710g_ubi_layout *xr1710g_active_ubi_layout =
+	&xr1710g_ubi_layouts[0];
+static bool xr1710g_ubi_layout_probed;
+static bool xr1710g_ubi_layout_available;
+
 static const char *const xr1710g_fdt_lan_mac_paths[] = {
 	"/soc/ethernet@1fb50000/ethernet@1",
 	"/soc/ethernet@1fb50000/ethernet@4",
@@ -349,22 +365,83 @@ static int xr1710g_ensure_ubi_volume(const char *name, size_t size)
 	return xr1710g_resize_ubi_volume(name, size);
 }
 
-static int xr1710g_select_ubi(void)
+static const struct xr1710g_ubi_layout *
+xr1710g_find_ubi_layout(const char *part)
+{
+	int i;
+
+	if (!part)
+		return NULL;
+
+	for (i = 0; i < ARRAY_SIZE(xr1710g_ubi_layouts); i++) {
+		if (!strcmp(part, xr1710g_ubi_layouts[i].part))
+			return &xr1710g_ubi_layouts[i];
+	}
+
+	return NULL;
+}
+
+static int xr1710g_select_ubi(const char *part)
 {
 	struct ubi_device *ubi;
 	bool selected = false;
 
+	if (!xr1710g_find_ubi_layout(part))
+		return -EINVAL;
+
 	ubi = ubi_get_device(0);
 	if (ubi) {
-		selected = ubi->mtd &&
-			   !strcmp(ubi->mtd->name, XR1710G_UBI_PART);
+		selected = ubi->mtd && !strcmp(ubi->mtd->name, part);
 		ubi_put_device(ubi);
 	}
 
-	return selected ? 0 : ubi_part(XR1710G_UBI_PART, NULL);
+	return selected ? 0 : ubi_part(part, NULL);
 }
 
-int xr1710g_sync_factory(void)
+const char *xr1710g_detect_ubi_part(void)
+{
+	int i, ret;
+
+	if (!xr1710g_is_compatible())
+		return XR1710G_UBI_PART;
+
+	if (xr1710g_ubi_layout_probed)
+		return xr1710g_active_ubi_layout->part;
+
+	xr1710g_ubi_layout_probed = true;
+	for (i = 0; i < ARRAY_SIZE(xr1710g_ubi_layouts); i++) {
+		ret = xr1710g_select_ubi(xr1710g_ubi_layouts[i].part);
+		if (ret) {
+			/* Only a size mismatch justifies probing a larger legacy view. */
+			if (ret == -ENOMEM && i + 1 < ARRAY_SIZE(xr1710g_ubi_layouts))
+				continue;
+			break;
+		}
+
+		xr1710g_active_ubi_layout = &xr1710g_ubi_layouts[i];
+		xr1710g_ubi_layout_available = true;
+		printf("XR1710G: detected UBI %s on '%s'\n",
+		       xr1710g_active_ubi_layout->version,
+		       xr1710g_active_ubi_layout->part);
+		break;
+	}
+
+	return xr1710g_active_ubi_layout->part;
+}
+
+const char *xr1710g_detect_ubi_version(void)
+{
+	xr1710g_detect_ubi_part();
+	return xr1710g_ubi_layout_available ?
+		xr1710g_active_ubi_layout->version : "unformatted";
+}
+
+const char *env_ubi_get_part(void)
+{
+	return xr1710g_detect_ubi_part();
+}
+
+int xr1710g_sync_factory_part(const char *part)
 {
 	u8 *src = NULL, *dst = NULL;
 	u8 *wan_mac, *lan_mac;
@@ -374,7 +451,7 @@ int xr1710g_sync_factory(void)
 	if (!xr1710g_is_compatible())
 		return 0;
 
-	ret = xr1710g_select_ubi();
+	ret = xr1710g_select_ubi(part);
 	if (ret) {
 		printf("XR1710G: skipping factory sync; UBI is unavailable: %d\n",
 		       ret);
@@ -439,6 +516,16 @@ out:
 	free(src);
 	free(dst);
 	return ret;
+}
+
+int xr1710g_sync_factory(void)
+{
+	const char *part = xr1710g_detect_ubi_part();
+
+	if (!xr1710g_ubi_layout_available)
+		return -ENODEV;
+
+	return xr1710g_sync_factory_part(part);
 }
 
 static void xr1710g_mac_add(const u8 *base, u8 delta, u8 *mac)
@@ -564,10 +651,17 @@ static int xr1710g_recovery_button_pressed(void)
 
 int board_late_init(void)
 {
+	char boot_ubi[64];
+	const char *ubi_part;
 	ulong recovery_addr;
 
 	xr1710g_sync_runtime_ethaddrs();
-	xr1710g_sync_factory();
+	ubi_part = xr1710g_detect_ubi_part();
+	snprintf(boot_ubi, sizeof(boot_ubi),
+		 "ubi part %s && run boot_production", ubi_part);
+	env_set("boot_ubi", boot_ubi);
+	if (xr1710g_ubi_layout_available)
+		xr1710g_sync_factory_part(ubi_part);
 
 	if (!xr1710g_recovery_button_pressed())
 		return 0;

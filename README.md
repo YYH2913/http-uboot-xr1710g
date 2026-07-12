@@ -28,13 +28,12 @@ main OpenWrt firmware.
 7. Select the upload target:
    - `firmware` writes the OpenWrt-generated `*-sysupgrade.itb` to `ubi:fit`.
    - `uboot` writes `xr1710g-chainloader-slot.bin` to the raw chainloader slot.
-8. For normal same-layout firmware upgrades, leave `Force wipe and recreate
-   firmware volumes` unchecked.
-9. For cross-partition or UBI volume layout upgrades, check `Force wipe and
-   recreate firmware volumes`, then upload the `firmware` image. This removes
-   non-preserved UBI volumes before recreating `ubi:fit`, while keeping or
-   recreating the preserved volumes such as `ubootenv`, `ubootenv2`, and
-   `factory`. This option only applies to the `firmware` target.
+8. For a firmware upload, select the layout used by that image: `UBI 2.0`,
+   `UBI 1.5`, or `UBI 1.0`. The selected UBI partition is erased and rebuilt
+   during flashing; only replacing `fit` is not sufficient when layouts differ.
+9. Full rebuild recreates `ubootenv`, `ubootenv2`, `fit`, and `rootfs_data`.
+   Factory EEPROM and MAC data are restored from the vendor DSD region, while
+   saved U-Boot environment values are reset.
 
 HTTP Recovery page screenshot:
 
@@ -385,14 +384,17 @@ saveenv
 
 ## Current Partition Layout
 
-The current flash partition layout is:
+The three supported UBI layouts share the same `vendor` and `chainloader`
+partitions. Only the UBI end boundary differs:
 
-| Name | Start | Size | End |
-|---|---:|---:|---:|
-| `vendor` | `0x00000000` | `0x00600000` | `0x005FFFFF` |
-| `chainloader` | `0x00600000` | `0x00100000` | `0x006FFFFF` |
-| `ubi` | `0x00700000` | `0x1B700000` | `0x1BDFFFFF` |
-| `reserved_bmt` | `0x1BE00000` | `0x04200000` | `0x1FFFFFFF` |
+| Version | U-Boot MTD view | UBI start | UBI size | Reserved tail |
+|---|---|---:|---:|---:|
+| `UBI 2.0` | `ubi` | `0x00700000` | `0x1B700000` | `0x04200000` (528 PEB) |
+| `UBI 1.5` | `ubi1.5` | `0x00700000` | `0x1D9C0000` | `0x01F40000` (250 PEB) |
+| `UBI 1.0` | `ubi1.0` | `0x00700000` | `0x1F700000` | `0x00200000` (16 PEB) |
+
+`vendor` is `0x00000000 + 0x00600000`; `chainloader` is
+`0x00600000 + 0x00100000`. New builds default to `UBI 2.0`.
 
 Inside `vendor`, the original vendor layout is still preserved:
 
@@ -400,12 +402,11 @@ Inside `vendor`, the original vendor layout is still preserved:
 - `uenv`: `0x00200000-0x003FFFFF`
 - `dsd`: `0x00400000-0x005FFFFF`
 
-This layout matches the current OP mainline layout. Because the `ubi`
-partition is smaller than in the previous layout, migration must fully rebuild
-UBI; flashing only the `fit`/sysupgrade volume is not sufficient or safe.
-In the OpenWrt tree, the upstream XR1710G DTS added by OpenWrt PR `#22397`
-uses the same partition model as the local U-Boot/OpenWrt tree for
-`vendor`, `chainloader`, `ubi`, and `reserved_bmt`.
+The `UBI 2.0` boundary follows the conservative 528-PEB reservation used by
+the local OP integration. Migration between versions must fully rebuild UBI;
+flashing only the `fit`/sysupgrade volume is not sufficient or safe. OpenWrt
+PR `#22397` is still unmerged and currently carries the older 16-PEB boundary;
+it is not evidence for the local `UBI 2.0` size.
 
 </details>
 

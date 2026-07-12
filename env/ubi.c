@@ -27,6 +27,11 @@
 
 DECLARE_GLOBAL_DATA_PTR;
 
+__weak const char *env_ubi_get_part(void)
+{
+	return CONFIG_ENV_UBI_PART;
+}
+
 #if CONFIG_ENV_REDUNDANT
 #define ENV_UBI_VOLUME_REDUND CONFIG_ENV_UBI_VOLUME_REDUND
 #else
@@ -43,9 +48,9 @@ static int env_ubi_save(void)
 	if (ret)
 		return ret;
 
-	if (ubi_part(CONFIG_ENV_UBI_PART, UBI_VID_OFFSET)) {
+	if (ubi_part(env_ubi_get_part(), UBI_VID_OFFSET)) {
 		printf("\n** Cannot find mtd partition \"%s\"\n",
-		       CONFIG_ENV_UBI_PART);
+		       env_ubi_get_part());
 		return 1;
 	}
 
@@ -54,7 +59,7 @@ static int env_ubi_save(void)
 		if (ubi_volume_write(CONFIG_ENV_UBI_VOLUME_REDUND,
 				     (void *)env_new, 0, CONFIG_ENV_SIZE)) {
 			printf("\n** Unable to write env to %s:%s **\n",
-			       CONFIG_ENV_UBI_PART,
+			       env_ubi_get_part(),
 			       CONFIG_ENV_UBI_VOLUME_REDUND);
 			return 1;
 		}
@@ -63,7 +68,7 @@ static int env_ubi_save(void)
 		if (ubi_volume_write(CONFIG_ENV_UBI_VOLUME,
 				     (void *)env_new, 0, CONFIG_ENV_SIZE)) {
 			printf("\n** Unable to write env to %s:%s **\n",
-			       CONFIG_ENV_UBI_PART,
+			       env_ubi_get_part(),
 			       CONFIG_ENV_UBI_VOLUME);
 			return 1;
 		}
@@ -85,16 +90,16 @@ static int env_ubi_save(void)
 	if (ret)
 		return ret;
 
-	if (ubi_part(CONFIG_ENV_UBI_PART, UBI_VID_OFFSET)) {
+	if (ubi_part(env_ubi_get_part(), UBI_VID_OFFSET)) {
 		printf("\n** Cannot find mtd partition \"%s\"\n",
-		       CONFIG_ENV_UBI_PART);
+		       env_ubi_get_part());
 		return 1;
 	}
 
 	if (ubi_volume_write(CONFIG_ENV_UBI_VOLUME, (void *)env_new, 0,
 			     CONFIG_ENV_SIZE)) {
 		printf("\n** Unable to write env to %s:%s **\n",
-		       CONFIG_ENV_UBI_PART, CONFIG_ENV_UBI_VOLUME);
+		       env_ubi_get_part(), CONFIG_ENV_UBI_VOLUME);
 		return 1;
 	}
 
@@ -143,9 +148,9 @@ static int env_ubi_load(void)
 	tmp_env1 = (env_t *)env1_buf;
 	tmp_env2 = (env_t *)env2_buf;
 
-	if (ubi_part(CONFIG_ENV_UBI_PART, UBI_VID_OFFSET)) {
+	if (ubi_part(env_ubi_get_part(), UBI_VID_OFFSET)) {
 		printf("\n** Cannot find mtd partition \"%s\"\n",
-		       CONFIG_ENV_UBI_PART);
+		       env_ubi_get_part());
 		env_set_default(NULL, 0);
 		return -EIO;
 	}
@@ -164,7 +169,7 @@ static int env_ubi_load(void)
 					     CONFIG_ENV_SIZE);
 		if (read1_fail)
 			printf("\n** Unable to read env from %s:%s **\n",
-			       CONFIG_ENV_UBI_PART, CONFIG_ENV_UBI_VOLUME);
+			       env_ubi_get_part(), CONFIG_ENV_UBI_VOLUME);
 	} else {
 		read1_fail = create1_fail;
 	}
@@ -174,7 +179,7 @@ static int env_ubi_load(void)
 					     tmp_env2, 0, CONFIG_ENV_SIZE);
 		if (read2_fail)
 			printf("\n** Unable to read redundant env from %s:%s **\n",
-			       CONFIG_ENV_UBI_PART,
+			       env_ubi_get_part(),
 			       CONFIG_ENV_UBI_VOLUME_REDUND);
 	} else {
 		read2_fail = create2_fail;
@@ -198,9 +203,9 @@ static int env_ubi_load(void)
 	 */
 	memset(buf, 0x0, CONFIG_ENV_SIZE);
 
-	if (ubi_part(CONFIG_ENV_UBI_PART, UBI_VID_OFFSET)) {
+	if (ubi_part(env_ubi_get_part(), UBI_VID_OFFSET)) {
 		printf("\n** Cannot find mtd partition \"%s\"\n",
-		       CONFIG_ENV_UBI_PART);
+		       env_ubi_get_part());
 		env_set_default(NULL, 0);
 		return -EIO;
 	}
@@ -214,7 +219,7 @@ static int env_ubi_load(void)
 
 	if (ubi_volume_read(CONFIG_ENV_UBI_VOLUME, buf, 0, CONFIG_ENV_SIZE)) {
 		printf("\n** Unable to read env from %s:%s **\n",
-		       CONFIG_ENV_UBI_PART, CONFIG_ENV_UBI_VOLUME);
+		       env_ubi_get_part(), CONFIG_ENV_UBI_VOLUME);
 		env_set_default(NULL, 0);
 		return -EIO;
 	}
@@ -228,9 +233,9 @@ static int env_ubi_erase(void)
 	ALLOC_CACHE_ALIGN_BUFFER(char, env_buf, CONFIG_ENV_SIZE);
 	int ret = 0;
 
-	if (ubi_part(CONFIG_ENV_UBI_PART, UBI_VID_OFFSET)) {
+	if (ubi_part(env_ubi_get_part(), UBI_VID_OFFSET)) {
 		printf("\n** Cannot find mtd partition \"%s\"\n",
-		       CONFIG_ENV_UBI_PART);
+		       env_ubi_get_part());
 		return 1;
 	}
 
@@ -239,7 +244,7 @@ static int env_ubi_erase(void)
 	if (ubi_volume_write(CONFIG_ENV_UBI_VOLUME,
 			     (void *)env_buf, 0, CONFIG_ENV_SIZE)) {
 		printf("\n** Unable to erase env to %s:%s **\n",
-		       CONFIG_ENV_UBI_PART,
+		       env_ubi_get_part(),
 		       CONFIG_ENV_UBI_VOLUME);
 		ret = 1;
 	}
@@ -247,7 +252,7 @@ static int env_ubi_erase(void)
 		if (ubi_volume_write(ENV_UBI_VOLUME_REDUND,
 				     (void *)env_buf, 0, CONFIG_ENV_SIZE)) {
 			printf("\n** Unable to erase env to %s:%s **\n",
-			       CONFIG_ENV_UBI_PART,
+			       env_ubi_get_part(),
 			       ENV_UBI_VOLUME_REDUND);
 			ret = 1;
 		}

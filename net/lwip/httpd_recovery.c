@@ -50,6 +50,8 @@
 DECLARE_GLOBAL_DATA_PTR;
 
 int xr1710g_sync_factory(void);
+int xr1710g_sync_factory_part(const char *part);
+const char *xr1710g_detect_ubi_version(void);
 ulong airoha_recovery_get_lan_activity_ms(void);
 
 /*
@@ -208,6 +210,20 @@ enum upload_target {
 	TARGET_UBOOT,
 };
 static enum upload_target current_target = TARGET_FIRMWARE;
+
+struct recovery_ubi_layout {
+	const char *version;
+	const char *part;
+};
+
+static const struct recovery_ubi_layout recovery_ubi_layouts[] = {
+	{ "2.0", "ubi" },
+	{ "1.5", "ubi1.5" },
+	{ "1.0", "ubi1.0" },
+};
+
+static const struct recovery_ubi_layout *current_ubi_layout =
+	&recovery_ubi_layouts[0];
 
 enum recovery_backend {
 	RECOVERY_BACKEND_MTD = 0,
@@ -1401,6 +1417,9 @@ static const char *recovery_ubi_part(enum upload_target tgt)
 {
 	const char *part;
 
+	if (tgt == TARGET_FIRMWARE && current_ubi_layout)
+		return current_ubi_layout->part;
+
 	switch (tgt) {
 	case TARGET_UBOOT:
 		part = env_get("recovery_ubi_part_uboot");
@@ -1415,6 +1434,30 @@ static const char *recovery_ubi_part(enum upload_target tgt)
 		part = env_get("recovery_ubi_part");
 
 	return part ?: "ubi";
+}
+
+static int recovery_parse_ubi_layout(const char *uri)
+{
+	const char *query;
+	int i;
+
+	current_ubi_layout = &recovery_ubi_layouts[0];
+	query = strchr(uri, '?');
+	if (!query)
+		return 0;
+
+	if (strncmp(query, "?layout=", 8))
+		return -EINVAL;
+	query += 8;
+
+	for (i = 0; i < ARRAY_SIZE(recovery_ubi_layouts); i++) {
+		if (!strcmp(query, recovery_ubi_layouts[i].version)) {
+			current_ubi_layout = &recovery_ubi_layouts[i];
+			return 0;
+		}
+	}
+
+	return -EINVAL;
 }
 
 static int recovery_select_ubi(const char *part)
@@ -1610,6 +1653,33 @@ static void recovery_release_target(struct recovery_target *target)
 		put_mtd_device(target->mtd);
 
 	target->mtd = NULL;
+}
+
+static int recovery_force_ubi_rebuild(struct recovery_target *target)
+{
+	struct mtd_info *mtd;
+
+	if (target->backend != RECOVERY_BACKEND_UBI || !target->ubi_part)
+		return -EINVAL;
+
+	ubi_detach();
+	recovery_ubi_attach_error = 0;
+	if (target->mtd) {
+		put_mtd_device(target->mtd);
+		target->mtd = NULL;
+	}
+
+	mtd_probe_devices();
+	mtd = get_mtd_device_nm(target->ubi_part);
+	if (IS_ERR_OR_NULL(mtd))
+		return IS_ERR(mtd) ? PTR_ERR(mtd) : -ENODEV;
+
+	target->mtd = mtd;
+	target->cur_size = 0;
+	target->limit = mtd->size;
+	target->ubi_needs_format = true;
+
+	return 0;
 }
 
 static void recovery_service_runtime(struct recovery_status_led_ctrl *status_leds)
@@ -2570,16 +2640,17 @@ int fs_open_custom(struct fs_file *file, const char *name)
 	        return 1;
 	    }
 	    else if (!strcmp(p, "about")) {
-        char json[256];
-        int json_len =
+	        char json[256];
+	        int json_len =
 #ifdef U_BOOT_DATE
-            snprintf(json, sizeof(json),
-                     "{\"u_boot\":\"%s (%s - %s %s)\"}\n",
-                     U_BOOT_VERSION, U_BOOT_DATE, U_BOOT_TIME, U_BOOT_TZ);
+	            snprintf(json, sizeof(json),
+	                     "{\"u_boot\":\"%s (%s - %s %s)\",\"detected_layout\":\"%s\"}\n",
+	                     U_BOOT_VERSION, U_BOOT_DATE, U_BOOT_TIME, U_BOOT_TZ,
+	                     xr1710g_detect_ubi_version());
 #else
-            snprintf(json, sizeof(json),
-                     "{\"u_boot\":\"%s\"}\n",
-                     U_BOOT_VERSION);
+	            snprintf(json, sizeof(json),
+	                     "{\"u_boot\":\"%s\",\"detected_layout\":\"%s\"}\n",
+	                     U_BOOT_VERSION, xr1710g_detect_ubi_version());
 #endif
         if (json_len < 0)
             return 0;
@@ -2641,6 +2712,7 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
     }
 
     post_ok = 0;
+    recovery_ubi_attach_error = 0;
     recv_off = 0;
     recv_total = 0;
     /* Reset progress state. */
@@ -2651,14 +2723,28 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
     prog_erase_total = 0;
     prog_write_done = 0;
     prog_write_total = 0;
-	    /* Accept optional query parameters after the target path. */
-    if (!strncmp(uri, "/upload/firmware", 16) && (uri[16] == '\0' || uri[16] == '?'))
+    /* Accept optional query parameters after the target path. */
+    if (!strncmp(uri, "/upload/firmware", 16) &&
+        (uri[16] == '\0' || uri[16] == '?')) {
         current_target = TARGET_FIRMWARE;
-    else if (!strncmp(uri, "/upload/uboot", 13) && (uri[13] == '\0' || uri[13] == '?'))
+        if (recovery_parse_ubi_layout(uri)) {
+            printf("httpd: rejecting unknown UBI layout in '%s'\n", uri);
+            prog_phase = -1;
+            strlcpy(response_uri, "/fail.html", response_uri_len);
+            return ERR_ARG;
+        }
+    } else if (!strncmp(uri, "/upload/uboot", 13) &&
+               (uri[13] == '\0' || uri[13] == '?')) {
         current_target = TARGET_UBOOT;
-    else if (!strncmp(uri, "/upload", 7) && (uri[7] == '\0' || uri[7] == '?'))
+    } else if (!strncmp(uri, "/upload", 7) &&
+               (uri[7] == '\0' || uri[7] == '?')) {
         current_target = TARGET_FIRMWARE;
-    else {
+        if (recovery_parse_ubi_layout(uri)) {
+            prog_phase = -1;
+            strlcpy(response_uri, "/fail.html", response_uri_len);
+            return ERR_ARG;
+        }
+    } else {
         prog_phase = -1;
         strlcpy(response_uri, "/fail.html", response_uri_len);
         return ERR_ARG;
@@ -2728,9 +2814,11 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
 
     post_ok = 1;
     /* Leave response_uri untouched here so the POST can complete normally. */
-    const char *tname = current_target == TARGET_FIRMWARE ? "firmware" : "uboot";
-    printf("httpd: accepting upload of %u bytes for %s to 0x%08lx\n",
-           recv_total, tname, (ulong)recv_base);
+    if (current_target == TARGET_FIRMWARE)
+        printf("httpd: accepting %u-byte firmware for UBI %s\n",
+               recv_total, current_ubi_layout->version);
+    else
+        printf("httpd: accepting %u-byte U-Boot image\n", recv_total);
     return ERR_OK;
 }
 
@@ -2813,6 +2901,18 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	}
 
 	if (current_target == TARGET_FIRMWARE &&
+	    target.backend == RECOVERY_BACKEND_UBI) {
+		ret = recovery_force_ubi_rebuild(&target);
+		if (ret) {
+			printf("Failed to select UBI %s rebuild target: %d\n",
+			       current_ubi_layout->version, ret);
+			recovery_release_target(&target);
+			prog_phase = -1;
+			return ret;
+		}
+	}
+
+	if (current_target == TARGET_FIRMWARE &&
 	    target.backend == RECOVERY_BACKEND_UBI)
 		target.limit = recovery_calc_rebuild_ubi_limit(&target);
 
@@ -2828,7 +2928,8 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		bool reformatted = false;
 
 		if (current_target == TARGET_FIRMWARE)
-			printf("Recovery mode: rebuilding non-preserved UBI volumes.\n");
+			printf("Recovery mode: recreating UBI %s on '%s'.\n",
+			       current_ubi_layout->version, target.ubi_part);
 
 		ret = recovery_prepare_ubi_target(&target, status_leds, image_size,
 						      &reformatted);
@@ -2911,7 +3012,7 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		recovery_release_target(&target);
 		prog_phase = 3;
 		if (current_target == TARGET_FIRMWARE)
-			xr1710g_sync_factory();
+			xr1710g_sync_factory_part(target.ubi_part);
 		return 0;
 	}
 
