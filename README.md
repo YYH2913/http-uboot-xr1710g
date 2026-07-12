@@ -39,13 +39,28 @@ HTTP Recovery page screenshot:
 
 ![HTTP Recovery page screenshot](./image.png)
 
+Latest verified multi-layout recovery build (`ab7fd651`, 2026-07-12):
+
+- Flash this file through the `uboot` target:
+  `../build-artifacts/xr1710g-20260712/xr1710g-uboot-v2026.07-ab7fd651-flash-slot.bin`
+  (`908722` bytes,
+  SHA256 `44e8911c55d3e8f2a8be1befb8a8d892047780ab46850057949a661ec2e45953`)
+- Bare chainloader FIT for RAM-only validation:
+  `../build-artifacts/xr1710g-20260712/xr1710g-uboot-v2026.07-ab7fd651-chainloader.itb`
+  (`900274` bytes,
+  SHA256 `4e64af50ff0a97fb6edca1c5a71af670ec8328a3872e133d7ac793109c1e1cf5`)
+
+The artifact name contains the source commit used by the embedded U-Boot:
+`U-Boot 2026.07-00760-gab7fd65100f1`.
+
 Do not upload `u-boot.bin`, `u-boot.img`, or `xr1710g-ubi.img` through HTTP
 Recovery. Use `xr1710g-chainloader-slot.bin` only with the `uboot` target.
 
 > [!WARNING]
 > - Do not flash `u-boot.bin` directly.
 > - Do not treat `u-boot.img` as the final flash image.
-> - The U-Boot/chainloader image to write is `out/xr1710g-chainloader-slot.bin`.
+> - The latest verified U-Boot/chainloader image is
+>   `../build-artifacts/xr1710g-20260712/xr1710g-uboot-v2026.07-ab7fd651-flash-slot.bin`.
 > - For main OpenWrt firmware, HTTP Recovery uses `*-sysupgrade.itb`, while
 >   low-level raw flashing uses `out/xr1710g-ubi.img`.
 
