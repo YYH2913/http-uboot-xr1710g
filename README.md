@@ -63,19 +63,19 @@ is `UBI 1.5`; rebuild it with `UBI 1.5`, even if U-Boot previously detected or
 created a 1.0 layout. The characteristic failure is `not enough PEBs` followed
 by `Waiting for root device /dev/fit0`.
 
-Latest verified multi-layout recovery build (`ab7fd651`, 2026-07-12):
+Latest verified multi-layout recovery build (`59060dde`, 2026-07-12):
 
 - Flash this file through the `uboot` target:
-  `../build-artifacts/xr1710g-20260712/xr1710g-uboot-v2026.07-ab7fd651-flash-slot.bin`
-  (`908722` bytes,
-  SHA256 `44e8911c55d3e8f2a8be1befb8a8d892047780ab46850057949a661ec2e45953`)
+  `../build-artifacts/xr1710g-20260712/xr1710g-uboot-v2026.07-59060dde-flash-slot.bin`
+  (`908778` bytes,
+  SHA256 `0d2277d578dcb05c004475c1f653d3078c1672182994eeb5ad17d37b0dc4023c`)
 - Bare chainloader FIT for RAM-only validation:
-  `../build-artifacts/xr1710g-20260712/xr1710g-uboot-v2026.07-ab7fd651-chainloader.itb`
-  (`900274` bytes,
-  SHA256 `4e64af50ff0a97fb6edca1c5a71af670ec8328a3872e133d7ac793109c1e1cf5`)
+  `../build-artifacts/xr1710g-20260712/xr1710g-uboot-v2026.07-59060dde-chainloader.itb`
+  (`900330` bytes,
+  SHA256 `c2cfa064ed631cd4494e8a9f150923eddd1950bb74bfbdd7d7a9bb4fcd28cf34`)
 
 The artifact name contains the source commit used by the embedded U-Boot:
-`U-Boot 2026.07-00760-gab7fd65100f1`.
+`U-Boot 2026.07-00762-g59060dde7b91`.
 
 Do not upload `u-boot.bin`, `u-boot.img`, or `xr1710g-ubi.img` through HTTP
 Recovery. Use the named `*-flash-slot.bin` artifact (or the generic build
@@ -85,7 +85,7 @@ output `xr1710g-chainloader-slot.bin`) only with the `uboot` target.
 > - Do not flash `u-boot.bin` directly.
 > - Do not treat `u-boot.img` as the final flash image.
 > - The latest verified U-Boot/chainloader image is
->   `../build-artifacts/xr1710g-20260712/xr1710g-uboot-v2026.07-ab7fd651-flash-slot.bin`.
+>   `../build-artifacts/xr1710g-20260712/xr1710g-uboot-v2026.07-59060dde-flash-slot.bin`.
 > - For main OpenWrt firmware, HTTP Recovery uses `*-sysupgrade.itb`, while
 >   low-level raw flashing uses `out/xr1710g-ubi.img`.
 
