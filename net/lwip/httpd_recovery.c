@@ -184,14 +184,65 @@ static bool recovery_board_is_sbe1v1k(void)
 #define RECOVERY_ENV_CRC_SIZE   4
 #define RECOVERY_SBE1V1K_REPARTITION_TOKEN "SBE1V1K_REPARTITION"
 #define RECOVERY_SBE1V1K_CHAINLOADER_PART "0#chainloader"
-#define RECOVERY_PARTITIONS_JSON_MAX (16 * 1024UL)
+#define RECOVERY_PARTITIONS_JSON_MAX (32 * 1024UL)
 #define RECOVERY_BACKUP_MAGIC         0x52424b50U
+#define RECOVERY_BACKUP_NAME_MAX      100U
+#define RECOVERY_TAR_BLOCK_SIZE       512ULL
+#define RECOVERY_TAR_END_SIZE         (2 * RECOVERY_TAR_BLOCK_SIZE)
+#define RECOVERY_TAR_MAX_MEMBER_SIZE  ((8ULL * 1024 * 1024 * 1024) - 1)
 #define RECOVERY_PREPARE_BODY_MAX     32U
 #define RECOVERY_PREPARE_START_DELAY_MS 100U
 
+enum recovery_backup_mode {
+	RECOVERY_BACKUP_SINGLE = 0,
+	RECOVERY_BACKUP_ALL_TAR,
+};
+
+enum recovery_backup_tar_phase {
+	RECOVERY_BACKUP_TAR_MEMBER_HEADER = 0,
+	RECOVERY_BACKUP_TAR_MEMBER_DATA,
+	RECOVERY_BACKUP_TAR_MEMBER_PADDING,
+	RECOVERY_BACKUP_TAR_END,
+	RECOVERY_BACKUP_TAR_DONE,
+};
+
+struct recovery_backup_source {
+	int hwpart;
+	int number;
+	lbaint_t start;
+	lbaint_t blocks;
+	ulong blksz;
+	unsigned long long bytes;
+	char name[PART_NAME_LEN + 1];
+	char filename[RECOVERY_BACKUP_NAME_MAX];
+};
+
+struct recovery_backup_tar_header {
+	char name[100];
+	char mode[8];
+	char uid[8];
+	char gid[8];
+	char size[12];
+	char mtime[12];
+	char checksum[8];
+	char typeflag;
+	char linkname[100];
+	char magic[6];
+	char version[2];
+	char uname[32];
+	char gname[32];
+	char devmajor[8];
+	char devminor[8];
+	char prefix[155];
+	char padding[12];
+} __packed;
+
 struct recovery_backup_file {
 	u32 magic;
+	enum recovery_backup_mode mode;
 	struct blk_desc *desc;
+	struct recovery_backup_source source;
+	unsigned int source_cursor;
 	lbaint_t next_lba;
 	lbaint_t blocks_left;
 	ulong blksz;
@@ -199,10 +250,17 @@ struct recovery_backup_file {
 	size_t cache_capacity;
 	size_t cache_len;
 	size_t cache_off;
-	char header[320];
-	size_t header_len;
-	size_t header_off;
+	char http_header[320];
+	size_t http_header_len;
+	size_t http_header_off;
+	struct recovery_backup_tar_header tar_header;
+	size_t tar_header_off;
+	unsigned long long tar_padding_left;
+	unsigned long long tar_end_left;
+	enum recovery_backup_tar_phase tar_phase;
+	bool failed;
 	bool active_counted;
+	bool user_restored;
 };
 
 static u8 *recv_base;
@@ -4789,16 +4847,320 @@ static void recovery_partition_filename(const char *name, char *safe,
 	safe[i] = '\0';
 }
 
+static int recovery_backup_source_from_partition(struct blk_desc *desc,
+						 int number,
+						 struct recovery_backup_source *source)
+{
+	struct disk_partition part;
+	char raw_name[PART_NAME_LEN + 1];
+	char safe_name[PART_NAME_LEN + 1];
+	ulong blksz;
+	int ret;
+
+	ret = part_get_info(desc, number, &part);
+	if (ret || !part.size)
+		return -ENOENT;
+
+	blksz = part.blksz ?: desc->blksz;
+	if (!blksz || (unsigned long long)part.size > ~0ULL / blksz)
+		return -EOVERFLOW;
+
+	memset(source, 0, sizeof(*source));
+	memcpy(raw_name, part.name, PART_NAME_LEN);
+	raw_name[PART_NAME_LEN] = '\0';
+	recovery_partition_display_name(raw_name, source->name,
+					sizeof(source->name));
+	recovery_partition_filename(raw_name, safe_name, sizeof(safe_name));
+
+	source->hwpart = EMMC_HWPART_DEFAULT;
+	source->number = number;
+	source->start = part.start;
+	source->blocks = part.size;
+	source->blksz = blksz;
+	source->bytes = (unsigned long long)part.size * blksz;
+	snprintf(source->filename, sizeof(source->filename), "p%02d-%s.img",
+		 number, safe_name[0] ? safe_name : "partition");
+	return 0;
+}
+
+static int recovery_backup_source_from_boot(struct blk_desc *desc,
+					    int boot_index,
+					    struct recovery_backup_source *source)
+{
+	int hwpart = EMMC_HWPART_BOOT1 + boot_index;
+	int ret;
+
+	ret = blk_dselect_hwpart(desc, hwpart);
+	if (ret)
+		return ret;
+	if (!desc->blksz || !desc->lba ||
+	    (unsigned long long)desc->lba > ~0ULL / desc->blksz)
+		return -EOVERFLOW;
+
+	memset(source, 0, sizeof(*source));
+	source->hwpart = hwpart;
+	source->start = 0;
+	source->blocks = desc->lba;
+	source->blksz = desc->blksz;
+	source->bytes = (unsigned long long)desc->lba * desc->blksz;
+	snprintf(source->name, sizeof(source->name), "eMMC boot%d", boot_index);
+	snprintf(source->filename, sizeof(source->filename), "emmc-boot%d.img",
+		 boot_index);
+	return 0;
+}
+
+/* boot0, boot1, then every valid GPT partition in the user area. */
+static int recovery_backup_next_source(struct blk_desc *desc,
+				       unsigned int *cursor,
+				       struct recovery_backup_source *source)
+{
+	unsigned int p;
+	int ret;
+
+	if (*cursor < 2) {
+		unsigned int boot_index = *cursor;
+
+		(*cursor)++;
+		ret = recovery_backup_source_from_boot(desc, boot_index, source);
+		return ret ? ret : 1;
+	}
+
+	ret = blk_dselect_hwpart(desc, EMMC_HWPART_DEFAULT);
+	if (ret)
+		return ret;
+
+	for (p = *cursor - 1; p <= MAX_SEARCH_PARTITIONS; p++) {
+		*cursor = p + 2;
+		ret = recovery_backup_source_from_partition(desc, p, source);
+		if (!ret)
+			return 1;
+		if (ret != -ENOENT)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int recovery_backup_restore_user(struct recovery_backup_file *backup)
+{
+	int ret;
+
+	if (backup->user_restored)
+		return 0;
+
+	ret = blk_dselect_hwpart(backup->desc, EMMC_HWPART_DEFAULT);
+	if (ret) {
+		printf("httpd: failed to restore eMMC user area after backup: %d\n",
+		       ret);
+		return ret;
+	}
+
+	backup->user_restored = true;
+	return 0;
+}
+
+static int recovery_tar_format_octal(char *field, size_t field_size,
+				     unsigned long long value)
+{
+	int len;
+
+	len = snprintf(field, field_size, "%0*llo", (int)field_size - 1, value);
+	return len == field_size - 1 ? 0 : -EOVERFLOW;
+}
+
+static int recovery_backup_prepare_tar_header(struct recovery_backup_file *backup)
+{
+	struct recovery_backup_tar_header *header = &backup->tar_header;
+	const u8 *raw = (const u8 *)header;
+	unsigned int checksum = 0;
+	size_t i;
+	int ret;
+
+	if (sizeof(*header) != RECOVERY_TAR_BLOCK_SIZE ||
+	    strlen(backup->source.filename) >= sizeof(header->name))
+		return -EOVERFLOW;
+
+	memset(header, 0, sizeof(*header));
+	strlcpy(header->name, backup->source.filename, sizeof(header->name));
+	ret = recovery_tar_format_octal(header->mode, sizeof(header->mode), 0600);
+	ret |= recovery_tar_format_octal(header->uid, sizeof(header->uid), 0);
+	ret |= recovery_tar_format_octal(header->gid, sizeof(header->gid), 0);
+	ret |= recovery_tar_format_octal(header->size, sizeof(header->size),
+					 backup->source.bytes);
+	ret |= recovery_tar_format_octal(header->mtime, sizeof(header->mtime), 0);
+	if (ret)
+		return ret;
+
+	memset(header->checksum, ' ', sizeof(header->checksum));
+	header->typeflag = '0';
+	memcpy(header->magic, "ustar", sizeof("ustar"));
+	memcpy(header->version, "00", sizeof(header->version));
+	strlcpy(header->uname, "root", sizeof(header->uname));
+	strlcpy(header->gname, "root", sizeof(header->gname));
+
+	for (i = 0; i < sizeof(*header); i++)
+		checksum += raw[i];
+	if (snprintf(header->checksum, sizeof(header->checksum), "%06o",
+		     checksum) != 6)
+		return -EOVERFLOW;
+	header->checksum[6] = '\0';
+	header->checksum[7] = ' ';
+	return 0;
+}
+
+static int
+recovery_backup_start_next_tar_source(struct recovery_backup_file *backup)
+{
+	struct recovery_backup_source source;
+	int ret;
+
+	ret = recovery_backup_next_source(backup->desc, &backup->source_cursor,
+					  &source);
+	if (ret <= 0) {
+		if (!ret) {
+			backup->tar_phase = RECOVERY_BACKUP_TAR_END;
+			backup->tar_end_left = RECOVERY_TAR_END_SIZE;
+		}
+		return ret;
+	}
+
+	backup->source = source;
+	backup->next_lba = source.start;
+	backup->blocks_left = source.blocks;
+	backup->blksz = source.blksz;
+	backup->cache_len = 0;
+	backup->cache_off = 0;
+	backup->tar_header_off = 0;
+	backup->tar_padding_left =
+		(RECOVERY_TAR_BLOCK_SIZE -
+		 (source.bytes % RECOVERY_TAR_BLOCK_SIZE)) %
+		RECOVERY_TAR_BLOCK_SIZE;
+	ret = recovery_backup_prepare_tar_header(backup);
+	if (ret)
+		return ret;
+	backup->tar_phase = RECOVERY_BACKUP_TAR_MEMBER_HEADER;
+	return 1;
+}
+
+static int recovery_backup_scan_all(struct blk_desc *desc,
+				    unsigned long long *archive_size,
+				    size_t *cache_capacity,
+				    unsigned int *source_count)
+{
+	struct recovery_backup_source source;
+	unsigned long long total = RECOVERY_TAR_END_SIZE;
+	unsigned int cursor = 0;
+	unsigned int count = 0;
+	size_t max_cache = 0;
+	int restore_ret;
+	int ret;
+
+	while ((ret = recovery_backup_next_source(desc, &cursor, &source)) > 0) {
+		unsigned long long padded;
+		size_t source_cache;
+
+		if (source.bytes > RECOVERY_TAR_MAX_MEMBER_SIZE) {
+			ret = -EFBIG;
+			break;
+		}
+		padded = (source.bytes + RECOVERY_TAR_BLOCK_SIZE - 1) &
+			 ~((unsigned long long)RECOVERY_TAR_BLOCK_SIZE - 1);
+		if (total > ~0ULL - RECOVERY_TAR_BLOCK_SIZE - padded) {
+			ret = -EOVERFLOW;
+			break;
+		}
+		total += RECOVERY_TAR_BLOCK_SIZE + padded;
+		source_cache = source.bytes < RECOVERY_MMC_BACKUP_CHUNK ?
+			       source.bytes : RECOVERY_MMC_BACKUP_CHUNK;
+		if (source_cache > max_cache)
+			max_cache = source_cache;
+		count++;
+	}
+
+	restore_ret = blk_dselect_hwpart(desc, EMMC_HWPART_DEFAULT);
+	if (!ret && restore_ret)
+		ret = restore_ret;
+	if (ret < 0)
+		return ret;
+	if (!count || !max_cache)
+		return -ENOENT;
+
+	*archive_size = total;
+	*cache_capacity = max_cache;
+	*source_count = count;
+	return 0;
+}
+
+static int recovery_backup_append_source_json(char *json, size_t json_size,
+					      size_t *off, bool comma,
+					      const struct recovery_backup_source *source)
+{
+	int boot_index;
+	int ret;
+
+	if (source->number) {
+		ret = recovery_appendf(json, json_size, off,
+				       "%s{\"id\":\"partition-%d\",\"kind\":\"gpt\",",
+				       comma ? "," : "", source->number);
+		if (ret)
+			return ret;
+		ret = recovery_appendf(json, json_size, off,
+				       "\"path\":\"/backup/partition-%d.bin\",\"number\":%d,",
+				       source->number, source->number);
+		if (ret)
+			return ret;
+		ret = recovery_appendf(json, json_size, off,
+				       "\"name\":\"%s\",\"start\":%llu,\"blocks\":%llu,",
+				       source->name,
+				       (unsigned long long)source->start,
+				       (unsigned long long)source->blocks);
+		if (ret)
+			return ret;
+		return recovery_appendf(json, json_size, off,
+			"\"block_size\":%lu,\"size\":%llu}",
+			source->blksz, source->bytes);
+	}
+
+	boot_index = source->hwpart - EMMC_HWPART_BOOT1;
+	ret = recovery_appendf(json, json_size, off,
+			       "%s{\"id\":\"boot%d\",\"kind\":\"hardware\",",
+			       comma ? "," : "", boot_index);
+	if (ret)
+		return ret;
+	ret = recovery_appendf(json, json_size, off,
+			       "\"path\":\"/backup/boot%d.bin\",\"name\":\"%s\",",
+			       boot_index, source->name);
+	if (ret)
+		return ret;
+	ret = recovery_appendf(json, json_size, off,
+			       "\"start\":0,\"blocks\":%llu,\"block_size\":%lu,",
+			       (unsigned long long)source->blocks,
+			       source->blksz);
+	if (ret)
+		return ret;
+	return recovery_appendf(json, json_size, off, "\"size\":%llu}",
+				 source->bytes);
+}
+
 static int recovery_open_partitions(struct fs_file *file)
 {
 	static char page[RECOVERY_PARTITIONS_JSON_MAX + 256];
 	static char json[RECOVERY_PARTITIONS_JSON_MAX];
+	struct recovery_backup_source source;
 	struct blk_desc *desc;
+	unsigned int cursor = 0;
 	size_t off = 0;
 	int count = 0;
 	int header_len;
 	int ret;
-	int p;
+
+	if (recovery_backup_active)
+		return recovery_http_error(file, "409 Conflict",
+					   "A backup stream is already active.\n");
+	if ((prog_phase > 0 && prog_phase < 3) || recovery_stream.active ||
+	    flash_request || prog_reboot || reboot_request)
+		return recovery_http_error(file, "409 Conflict",
+					   "A destructive storage operation is active.\n");
 
 	ret = blk_get_device_by_str("mmc", recovery_mmcdev(), &desc);
 	if (ret < 0)
@@ -4806,37 +5168,18 @@ static int recovery_open_partitions(struct fs_file *file)
 					   "eMMC device is unavailable.\n");
 
 	off += snprintf(json + off, sizeof(json) - off, "{\"partitions\":[");
-	for (p = 1; p <= MAX_SEARCH_PARTITIONS; p++) {
-		struct disk_partition part;
-		char item[320];
-		char name[PART_NAME_LEN + 1];
-		unsigned long long bytes;
-		int item_len;
-
-		ret = part_get_info(desc, p, &part);
-		if (ret || !part.size)
-			continue;
-
-		recovery_partition_display_name((const char *)part.name, name,
-						sizeof(name));
-		bytes = (unsigned long long)part.size *
-			(unsigned long long)(part.blksz ?: desc->blksz);
-		item_len = snprintf(item, sizeof(item),
-				    "%s{\"number\":%d,\"name\":\"%s\","
-				    "\"start\":%llu,\"blocks\":%llu,"
-				    "\"block_size\":%lu,\"size\":%llu}",
-				    count ? "," : "", p, name,
-				    (unsigned long long)part.start,
-				    (unsigned long long)part.size,
-				    part.blksz ?: desc->blksz, bytes);
-		if (item_len < 0 || item_len >= sizeof(item) ||
-		    off + item_len + sizeof("]}\n") > sizeof(json))
+	while ((ret = recovery_backup_next_source(desc, &cursor, &source)) > 0) {
+		ret = recovery_backup_append_source_json(json, sizeof(json), &off,
+							 count, &source);
+		if (ret)
 			break;
-
-		memcpy(json + off, item, item_len);
-		off += item_len;
 		count++;
 	}
+	if (blk_dselect_hwpart(desc, EMMC_HWPART_DEFAULT) && ret >= 0)
+		ret = -EIO;
+	if (ret < 0)
+		return recovery_http_error(file, "503 Service Unavailable",
+					   "Cannot enumerate all eMMC partitions.\n");
 
 	memcpy(json + off, "]}\n", sizeof("]}\n"));
 	off += sizeof("]}\n") - 1;
@@ -4877,24 +5220,61 @@ static int recovery_backup_partition_number(const char *path)
 	return number;
 }
 
+enum recovery_backup_request {
+	RECOVERY_BACKUP_REQUEST_NONE = 0,
+	RECOVERY_BACKUP_REQUEST_PARTITION,
+	RECOVERY_BACKUP_REQUEST_BOOT0,
+	RECOVERY_BACKUP_REQUEST_BOOT1,
+	RECOVERY_BACKUP_REQUEST_ALL,
+	RECOVERY_BACKUP_REQUEST_INVALID,
+};
+
+static enum recovery_backup_request
+recovery_backup_parse_request(const char *path, int *number)
+{
+	int ret;
+
+	if (!strcmp(path, "backup/boot0.bin"))
+		return RECOVERY_BACKUP_REQUEST_BOOT0;
+	if (!strcmp(path, "backup/boot1.bin"))
+		return RECOVERY_BACKUP_REQUEST_BOOT1;
+	if (!strcmp(path, "backup/all.tar"))
+		return RECOVERY_BACKUP_REQUEST_ALL;
+
+	ret = recovery_backup_partition_number(path);
+	if (ret == -ENOENT)
+		return RECOVERY_BACKUP_REQUEST_NONE;
+	if (ret < 0)
+		return RECOVERY_BACKUP_REQUEST_INVALID;
+	*number = ret;
+	return RECOVERY_BACKUP_REQUEST_PARTITION;
+}
+
 static int recovery_open_backup(struct fs_file *file, const char *path)
 {
 	struct recovery_backup_file *backup;
-	struct disk_partition part;
+	struct recovery_backup_source source;
 	struct blk_desc *desc;
-	char filename[PART_NAME_LEN + 1];
-	unsigned long long bytes;
+	unsigned long long archive_size = 0;
+	unsigned int source_count = 0;
 	lbaint_t cache_blocks;
-	size_t cache_capacity;
-	int number;
+	size_t cache_capacity = 0;
+	enum recovery_backup_request request;
+	const char *error_message = "Cannot prepare eMMC backup.\n";
+	const char *error_status = "503 Service Unavailable";
+	int header_len;
+	int number = 0;
 	int ret;
 
-	number = recovery_backup_partition_number(path);
-	if (number == -ENOENT)
+	request = recovery_backup_parse_request(path, &number);
+	if (request == RECOVERY_BACKUP_REQUEST_NONE)
 		return 0;
-	if (number < 0)
+	if (request == RECOVERY_BACKUP_REQUEST_INVALID)
 		return recovery_http_error(file, "400 Bad Request",
 					   "Invalid partition backup path.\n");
+	if (recovery_backup_active)
+		return recovery_http_error(file, "409 Conflict",
+					   "A backup stream is already active.\n");
 	if ((prog_phase > 0 && prog_phase < 3) || recovery_stream.active ||
 	    flash_request || prog_reboot || reboot_request)
 		return recovery_http_error(file, "409 Conflict",
@@ -4904,62 +5284,99 @@ static int recovery_open_backup(struct fs_file *file, const char *path)
 	if (ret < 0)
 		return recovery_http_error(file, "503 Service Unavailable",
 					   "eMMC device is unavailable.\n");
-	ret = part_get_info(desc, number, &part);
-	if (ret || !part.size)
-		return recovery_http_error(file, "404 Not Found",
-					   "Partition does not exist.\n");
 
 	backup = calloc(1, sizeof(*backup));
 	if (!backup)
 		return recovery_http_error(file, "503 Service Unavailable",
 					   "Cannot allocate backup state.\n");
 
-	backup->blksz = part.blksz ?: desc->blksz;
-	if (!backup->blksz) {
-		free(backup);
-		return recovery_http_error(file, "500 Internal Server Error",
-					   "Invalid eMMC block size.\n");
-	}
-	cache_blocks = RECOVERY_MMC_BACKUP_CHUNK / backup->blksz;
-	if (!cache_blocks) {
-		free(backup);
-		return recovery_http_error(file, "500 Internal Server Error",
-						   "eMMC block size exceeds backup buffer.\n");
-	}
-	if (cache_blocks > part.size)
-		cache_blocks = part.size;
-	cache_capacity = cache_blocks * backup->blksz;
-	backup->cache = memalign(ARCH_DMA_MINALIGN, cache_capacity);
-	if (!backup->cache) {
-		free(backup);
-		return recovery_http_error(file, "503 Service Unavailable",
-					   "Cannot allocate backup buffer.\n");
+	backup->desc = desc;
+	if (request == RECOVERY_BACKUP_REQUEST_ALL) {
+		ret = recovery_backup_scan_all(desc, &archive_size, &cache_capacity,
+					       &source_count);
+		if (ret) {
+			if (ret == -EFBIG) {
+				error_status = "500 Internal Server Error";
+				error_message =
+					"A partition is too large for a ustar member.\n";
+			}
+			goto error;
+		}
+		backup->mode = RECOVERY_BACKUP_ALL_TAR;
+	} else {
+		if (request == RECOVERY_BACKUP_REQUEST_PARTITION) {
+			ret = blk_dselect_hwpart(desc, EMMC_HWPART_DEFAULT);
+			if (!ret)
+				ret = recovery_backup_source_from_partition(desc,
+									    number, &source);
+		} else {
+			ret = recovery_backup_source_from_boot(desc,
+							       request ==
+							       RECOVERY_BACKUP_REQUEST_BOOT1,
+							       &source);
+		}
+		if (ret) {
+			if (ret == -ENOENT) {
+				error_status = "404 Not Found";
+				error_message = "Partition does not exist.\n";
+			}
+			goto error;
+		}
+
+		backup->mode = RECOVERY_BACKUP_SINGLE;
+		backup->source = source;
+		backup->next_lba = source.start;
+		backup->blocks_left = source.blocks;
+		backup->blksz = source.blksz;
+		cache_blocks = RECOVERY_MMC_BACKUP_CHUNK / source.blksz;
+		if (!cache_blocks) {
+			error_status = "500 Internal Server Error";
+			error_message = "eMMC block size exceeds backup buffer.\n";
+			goto error;
+		}
+		if (cache_blocks > source.blocks)
+			cache_blocks = source.blocks;
+		cache_capacity = cache_blocks * source.blksz;
 	}
 
-	recovery_partition_filename((const char *)part.name, filename,
-				    sizeof(filename));
-	bytes = (unsigned long long)part.size * backup->blksz;
-	backup->header_len = snprintf(backup->header, sizeof(backup->header),
+	backup->cache = memalign(ARCH_DMA_MINALIGN, cache_capacity);
+	if (!backup->cache) {
+		error_message = "Cannot allocate backup buffer.\n";
+		goto error;
+	}
+	backup->cache_capacity = cache_capacity;
+
+	if (backup->mode == RECOVERY_BACKUP_ALL_TAR) {
+		header_len = snprintf(backup->http_header,
+				      sizeof(backup->http_header),
 				      "HTTP/1.0 200 OK\r\n"
-				      "Content-Type: application/octet-stream\r\n"
+				      "Content-Type: application/x-tar\r\n"
 				      "Content-Disposition: attachment; "
-				      "filename=\"sbe1v1k-p%02d-%s.img\"\r\n"
+				      "filename=\"sbe1v1k-emmc-backup.tar\"\r\n"
 				      "Cache-Control: no-store\r\n"
 				      "Content-Length: %llu\r\n"
 				      "Connection: close\r\n\r\n",
-				      number, filename[0] ? filename : "partition",
-				      bytes);
-	if (backup->header_len >= sizeof(backup->header)) {
-		free(backup->cache);
-		free(backup);
-		return 0;
+				      archive_size);
+		ret = recovery_backup_start_next_tar_source(backup);
+		if (ret <= 0)
+			goto error;
+	} else {
+		header_len = snprintf(backup->http_header,
+				      sizeof(backup->http_header),
+				      "HTTP/1.0 200 OK\r\n"
+				      "Content-Type: application/octet-stream\r\n"
+				      "Content-Disposition: attachment; "
+				      "filename=\"sbe1v1k-%s\"\r\n"
+				      "Cache-Control: no-store\r\n"
+				      "Content-Length: %llu\r\n"
+				      "Connection: close\r\n\r\n",
+				      source.filename, source.bytes);
 	}
+	if (header_len < 0 || header_len >= sizeof(backup->http_header))
+		goto error;
+	backup->http_header_len = header_len;
 
 	backup->magic = RECOVERY_BACKUP_MAGIC;
-	backup->desc = desc;
-	backup->next_lba = part.start;
-	backup->blocks_left = part.size;
-	backup->cache_capacity = cache_capacity;
 	backup->active_counted = true;
 	recovery_backup_active++;
 
@@ -4968,9 +5385,19 @@ static int recovery_open_backup(struct fs_file *file, const char *path)
 	file->index = 0;
 	file->pextension = (fs_file_extension *)backup;
 	file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
-	printf("httpd: streaming backup of partition %d '%s' (%llu bytes)\n",
-	       number, (const char *)part.name, bytes);
+	if (backup->mode == RECOVERY_BACKUP_ALL_TAR)
+		printf("httpd: streaming full eMMC backup (%u sources, %llu-byte tar)\n",
+		       source_count, archive_size);
+	else
+		printf("httpd: streaming backup of %s (%llu bytes)\n",
+		       source.name, source.bytes);
 	return 1;
+
+error:
+	blk_dselect_hwpart(desc, EMMC_HWPART_DEFAULT);
+	free(backup->cache);
+	free(backup);
+	return recovery_http_error(file, error_status, error_message);
 }
 
 static int recovery_http_json(struct fs_file *file, char *page,
@@ -5122,6 +5549,7 @@ void fs_close_custom(struct fs_file *file)
 	if (backup->magic != RECOVERY_BACKUP_MAGIC)
 		return;
 
+	recovery_backup_restore_user(backup);
 	backup->magic = 0;
 	if (backup->active_counted && recovery_backup_active)
 		recovery_backup_active--;
@@ -5130,47 +5558,63 @@ void fs_close_custom(struct fs_file *file)
 	file->pextension = NULL;
 }
 
-static int recovery_read_backup(struct recovery_backup_file *backup,
-				char *buffer, int count)
+static int recovery_backup_fill_cache(struct recovery_backup_file *backup)
+{
+	lbaint_t blocks;
+	int ret;
+
+	if (!backup->blocks_left)
+		return 0;
+	if (backup->desc->hwpart != backup->source.hwpart) {
+		ret = blk_dselect_hwpart(backup->desc, backup->source.hwpart);
+		if (ret) {
+			printf("httpd: cannot select eMMC hwpart %d for backup: %d\n",
+			       backup->source.hwpart, ret);
+			goto read_error;
+		}
+	}
+
+	blocks = backup->cache_capacity / backup->blksz;
+	if (!blocks)
+		goto read_error;
+	if (blocks > backup->blocks_left)
+		blocks = backup->blocks_left;
+	if (blk_dread(backup->desc, backup->next_lba, blocks,
+		      backup->cache) != blocks) {
+		printf("httpd: eMMC backup read failed on hwpart %d at block "
+		       LBAF "\n", backup->source.hwpart, backup->next_lba);
+		goto read_error;
+	}
+
+	backup->next_lba += blocks;
+	backup->blocks_left -= blocks;
+	backup->cache_len = blocks * backup->blksz;
+	backup->cache_off = 0;
+	recovery_watchdog_poll();
+	return 1;
+
+read_error:
+	backup->failed = true;
+	backup->blocks_left = 0;
+	backup->cache_len = 0;
+	backup->cache_off = 0;
+	return -EIO;
+}
+
+static int recovery_read_backup_single(struct recovery_backup_file *backup,
+				       char *buffer, int count)
 {
 	int copied = 0;
 
 	while (copied < count) {
 		size_t available;
 		size_t todo;
-
-		if (backup->header_off < backup->header_len) {
-			available = backup->header_len - backup->header_off;
-			todo = min_t(size_t, available, count - copied);
-			memcpy(buffer + copied,
-			       backup->header + backup->header_off, todo);
-			backup->header_off += todo;
-			copied += todo;
-			continue;
-		}
+		int ret;
 
 		if (backup->cache_off >= backup->cache_len) {
-			lbaint_t blocks;
-
-			if (!backup->blocks_left)
+			ret = recovery_backup_fill_cache(backup);
+			if (ret <= 0)
 				break;
-			blocks = backup->cache_capacity / backup->blksz;
-			if (blocks > backup->blocks_left)
-				blocks = backup->blocks_left;
-			if (blk_dread(backup->desc, backup->next_lba, blocks,
-				      backup->cache) != blocks) {
-				printf("httpd: eMMC backup read failed at block "
-				       LBAF "\n", backup->next_lba);
-				backup->blocks_left = 0;
-				backup->cache_len = 0;
-				break;
-			}
-
-			backup->next_lba += blocks;
-			backup->blocks_left -= blocks;
-			backup->cache_len = blocks * backup->blksz;
-			backup->cache_off = 0;
-			recovery_watchdog_poll();
 		}
 
 		available = backup->cache_len - backup->cache_off;
@@ -5180,7 +5624,122 @@ static int recovery_read_backup(struct recovery_backup_file *backup,
 		copied += todo;
 	}
 
+	if (!backup->blocks_left && backup->cache_off >= backup->cache_len)
+		recovery_backup_restore_user(backup);
 	return copied ? copied : FS_READ_EOF;
+}
+
+static int recovery_read_backup_tar(struct recovery_backup_file *backup,
+				    char *buffer, int count)
+{
+	int copied = 0;
+
+	while (copied < count) {
+		size_t available;
+		size_t todo;
+		int ret;
+
+		switch (backup->tar_phase) {
+		case RECOVERY_BACKUP_TAR_MEMBER_HEADER:
+			available = sizeof(backup->tar_header) -
+				    backup->tar_header_off;
+			todo = min_t(size_t, available, count - copied);
+			memcpy(buffer + copied,
+			       (const u8 *)&backup->tar_header +
+			       backup->tar_header_off, todo);
+			backup->tar_header_off += todo;
+			copied += todo;
+			if (backup->tar_header_off == sizeof(backup->tar_header))
+				backup->tar_phase = RECOVERY_BACKUP_TAR_MEMBER_DATA;
+			break;
+
+		case RECOVERY_BACKUP_TAR_MEMBER_DATA:
+			if (backup->cache_off >= backup->cache_len) {
+				ret = recovery_backup_fill_cache(backup);
+				if (ret < 0)
+					goto failed;
+				if (!ret) {
+					backup->tar_phase =
+						RECOVERY_BACKUP_TAR_MEMBER_PADDING;
+					break;
+				}
+			}
+			available = backup->cache_len - backup->cache_off;
+			todo = min_t(size_t, available, count - copied);
+			memcpy(buffer + copied, backup->cache + backup->cache_off,
+			       todo);
+			backup->cache_off += todo;
+			copied += todo;
+			break;
+
+		case RECOVERY_BACKUP_TAR_MEMBER_PADDING:
+			if (backup->tar_padding_left) {
+				todo = min_t(unsigned long long,
+					     backup->tar_padding_left, count - copied);
+				memset(buffer + copied, 0, todo);
+				backup->tar_padding_left -= todo;
+				copied += todo;
+				break;
+			}
+			ret = recovery_backup_start_next_tar_source(backup);
+			if (ret < 0)
+				goto failed;
+			break;
+
+		case RECOVERY_BACKUP_TAR_END:
+			if (backup->tar_end_left) {
+				todo = min_t(unsigned long long, backup->tar_end_left,
+					     count - copied);
+				memset(buffer + copied, 0, todo);
+				backup->tar_end_left -= todo;
+				copied += todo;
+				break;
+			}
+			backup->tar_phase = RECOVERY_BACKUP_TAR_DONE;
+			recovery_backup_restore_user(backup);
+			break;
+
+		case RECOVERY_BACKUP_TAR_DONE:
+			return copied ? copied : FS_READ_EOF;
+		}
+	}
+
+	return copied ? copied : FS_READ_EOF;
+
+failed:
+	backup->failed = true;
+	backup->tar_phase = RECOVERY_BACKUP_TAR_DONE;
+	recovery_backup_restore_user(backup);
+	return copied ? copied : FS_READ_EOF;
+}
+
+static int recovery_read_backup(struct recovery_backup_file *backup,
+				char *buffer, int count)
+{
+	int copied = 0;
+	int read;
+
+	if (backup->http_header_off < backup->http_header_len) {
+		size_t available = backup->http_header_len -
+				   backup->http_header_off;
+		size_t todo = min_t(size_t, available, count);
+
+		memcpy(buffer, backup->http_header + backup->http_header_off, todo);
+		backup->http_header_off += todo;
+		copied += todo;
+	}
+	if (copied == count)
+		return copied;
+
+	if (backup->mode == RECOVERY_BACKUP_ALL_TAR)
+		read = recovery_read_backup_tar(backup, buffer + copied,
+						count - copied);
+	else
+		read = recovery_read_backup_single(backup, buffer + copied,
+						   count - copied);
+	if (read > 0)
+		copied += read;
+	return copied ? copied : read;
 }
 
 int fs_read_custom(struct fs_file *file, char *buffer, int count)
@@ -5196,10 +5755,15 @@ int fs_read_custom(struct fs_file *file, char *buffer, int count)
 	backup = (struct recovery_backup_file *)file->pextension;
 	if (backup && backup->magic == RECOVERY_BACKUP_MAGIC) {
 		read = recovery_read_backup(backup, buffer, count);
-		finished = backup->header_off >= backup->header_len &&
-			   !backup->blocks_left &&
-			   backup->cache_off >= backup->cache_len;
+		if (backup->mode == RECOVERY_BACKUP_ALL_TAR)
+			finished = backup->tar_phase == RECOVERY_BACKUP_TAR_DONE;
+		else
+			finished = !backup->blocks_left &&
+				   backup->cache_off >= backup->cache_len;
+		finished = finished &&
+			   backup->http_header_off >= backup->http_header_len;
 		if (read < 0 || finished) {
+			recovery_backup_restore_user(backup);
 			file->index = file->len;
 		} else if (file->index > file->len - read - 1) {
 			/* Keep lwIP's int-sized cursor live for partitions over 2 GiB. */
