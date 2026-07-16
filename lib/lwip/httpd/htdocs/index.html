@@ -318,6 +318,7 @@ button{touch-action:manipulation}
 .progress-row.complete .progress-fill{background:var(--green)}
 .progress-percent{text-align:right;color:var(--muted);font:11px ui-monospace,SFMono-Regular,Consolas,monospace}
 .layout-copy{margin:0 0 22px;color:var(--muted)}
+.layout-view .layout-copy{margin-top:20px}
 .partition-table{min-width:620px;border-top:1px solid var(--line)}
 .partition-scroll{overflow-x:auto}
 .partition-row{
@@ -465,7 +466,7 @@ button{touch-action:manipulation}
 
         <div class="workspace upload-view" id="upload-view">
           <label class="file-label" for="file-input">Image file</label>
-          <input class="file-input" id="file-input" type="file" accept=".bin,.img,.itb">
+          <input class="file-input" id="file-input" type="file" accept=".bin,.img,.itb,.tar">
           <div class="file-picker">
             <button class="choose-button" id="choose-button" type="button">Choose file</button>
             <span class="file-name" id="file-name">No file selected</span>
@@ -488,22 +489,25 @@ button{touch-action:manipulation}
         </div>
 
         <div class="workspace layout-view" id="layout-view" hidden>
-          <p class="layout-copy">Partitions before LBA 110626 are preserved; the tail is rebuilt as shown.</p>
+          <label class="backup-label" for="layout-select">Partition profile</label>
+          <select class="partition-select" id="layout-select">
+            <option value="mainline">OpenWrt mainline / factory-compatible</option>
+            <option value="large" selected>Large storage</option>
+          </select>
+          <p class="backup-help" id="layout-help">Choose the target partition profile.</p>
+          <p class="layout-copy" id="layout-copy">Partitions before LBA 110626 are preserved; the tail is rebuilt as shown.</p>
           <div class="partition-scroll">
             <div class="partition-table" role="table" aria-label="Target eMMC layout">
               <div class="partition-row header" role="row"><span>Name</span><span>Start LBA</span><span>Size</span><span>Purpose</span></div>
-              <div class="partition-row" role="row"><span class="partition-name">chainloader</span><span>110626</span><span>4 MiB</span><span>U-Boot FIT</span></div>
-              <div class="partition-row" role="row"><span class="partition-name">kernel</span><span>118818</span><span>32 MiB</span><span>Boot FIT</span></div>
-              <div class="partition-row" role="row"><span class="partition-name">rootfs</span><span>184354</span><span>1 GiB</span><span>SquashFS</span></div>
-              <div class="partition-row" role="row"><span class="partition-name">rootfs_data</span><span>2281506</span><span>Remaining</span><span>Persistent data</span></div>
+              <div id="layout-rows" role="rowgroup"></div>
             </div>
           </div>
 
           <div class="warning">
             <span class="warning-mark">!</span>
             <div>
-              <strong>Erases the current tail layout</strong>
-              <p>Upload firmware before rebooting.</p>
+              <strong id="layout-warning-title">Erases the current tail layout</strong>
+              <p id="layout-warning-copy">Upload firmware before rebooting.</p>
             </div>
           </div>
 
@@ -567,6 +571,13 @@ button{touch-action:manipulation}
 <script>
 var activeView="firmware";
 var selectedFile=null;
+var selectedFileFormat="";
+var selectedRawLayout="";
+var selectedUploadFormat="raw";
+var fileInspection=0;
+var activeDiskLayout="unknown";
+var firmwareKernelPad=32*1024*1024;
+var firmwareMax=1024*1024*1024;
 var busy=false;
 var pollTimer=null;
 var pollEpoch=0;
@@ -625,6 +636,41 @@ var profiles={
   }
 };
 
+var layoutProfiles={
+  mainline:{
+    target:"Mainline / factory GPT",
+    method:"Rebuild factory-compatible tail",
+    limit:"LBA 110626",
+    copy:"Uses the OpenWrt mainline partition map and keeps the original service partitions.",
+    help:"Kernel: 0:HLOS · Root: rootfs · Chainloader: rsvd_2",
+    warningTitle:"Rebuilds the factory-compatible tail",
+    warning:"The selected firmware targets and rsvd_2 are erased. Upload a mainline sysupgrade image before rebooting.",
+    action:"Apply mainline layout",
+    rows:[
+      ["0:HLOS","81954","7 MiB","Boot FIT"],
+      ["rootfs","110626","122 MiB","SquashFS"],
+      ["rootfs_data","610338","512 MiB","Persistent data"],
+      ["rsvd_2","5201954","32 MiB","Chainloader FIT"]
+    ]
+  },
+  large:{
+    target:"Large OpenWrt layout",
+    method:"Keep prefix, rebuild tail",
+    limit:"LBA 110626",
+    copy:"Partitions before LBA 110626 are preserved; the tail is rebuilt as shown.",
+    help:"Kernel: kernel · Root: rootfs · Chainloader: chainloader",
+    warningTitle:"Erases the current tail layout",
+    warning:"The current tail partitions are replaced. Upload a large-layout recovery image before rebooting.",
+    action:"Apply large layout",
+    rows:[
+      ["chainloader","110626","4 MiB","U-Boot FIT"],
+      ["kernel","118818","32 MiB","Boot FIT"],
+      ["rootfs","184354","1 GiB","SquashFS"],
+      ["rootfs_data","2281506","Remaining","Persistent data"]
+    ]
+  }
+};
+
 var fileInput=document.getElementById("file-input");
 var chooseButton=document.getElementById("choose-button");
 var fileName=document.getElementById("file-name");
@@ -633,6 +679,8 @@ var fileHelp=document.getElementById("file-help");
 var uploadButton=document.getElementById("upload-button");
 var confirmInput=document.getElementById("confirm-input");
 var repartitionButton=document.getElementById("repartition-button");
+var layoutSelect=document.getElementById("layout-select");
+var layoutRows=document.getElementById("layout-rows");
 var partitionSelect=document.getElementById("partition-select");
 var backupButton=document.getElementById("backup-button");
 var backupHelp=document.getElementById("backup-help");
@@ -650,10 +698,114 @@ function formatBytes(bytes){
   return(bytes/(1024*1024*1024)).toFixed(2)+" GiB";
 }
 
+function configureActiveLayout(layout,kernelPad,maxSize){
+  activeDiskLayout=layoutProfiles[layout]?layout:"unknown";
+  firmwareKernelPad=kernelPad||32*1024*1024;
+  firmwareMax=maxSize||1024*1024*1024;
+  if(activeDiskLayout==="mainline"){
+    profiles.firmware.target="0:HLOS + rootfs";
+    profiles.firmware.limit="Up to "+formatBytes(firmwareMax);
+    profiles.firmware.help="Select a mainline sysupgrade tar or matching raw recovery image.";
+    profiles.firmware.warning="0:HLOS, rootfs and rootfs_data are erased before writing. Do not power off.";
+    profiles.firmware.note="First 7 MiB → 0:HLOS; rest → rootfs.";
+    profiles.uboot.target="rsvd_2";
+    profiles.uboot.warning="rsvd_2 is erased before writing. A failed transfer can break recovery boot.";
+  }else{
+    profiles.firmware.target="kernel + rootfs";
+    profiles.firmware.limit="Up to "+formatBytes(firmwareMax);
+    profiles.firmware.help="Select a sysupgrade tar or large-layout recovery image.";
+    profiles.firmware.warning="kernel, rootfs and rootfs_data are erased before writing. Do not power off.";
+    profiles.firmware.note="First 32 MiB → kernel, rest → rootfs.";
+    profiles.uboot.target="chainloader";
+    profiles.uboot.warning="chainloader is erased before writing. A failed transfer can break recovery boot.";
+  }
+  if(selectedFile)validateFile();
+}
+
+function updateLayoutSelection(){
+  var selected=layoutProfiles[layoutSelect.value]||layoutProfiles.large;
+  document.getElementById("layout-copy").textContent=selected.copy;
+  document.getElementById("layout-help").textContent=selected.help;
+  document.getElementById("layout-warning-title").textContent=selected.warningTitle;
+  document.getElementById("layout-warning-copy").textContent=selected.warning;
+  repartitionButton.textContent=selected.action;
+  layoutRows.textContent="";
+  for(var i=0;i<selected.rows.length;i++){
+    var row=document.createElement("div");
+    row.className="partition-row";
+    row.setAttribute("role","row");
+    for(var j=0;j<selected.rows[i].length;j++){
+      var cell=document.createElement("span");
+      if(j===0)cell.className="partition-name";
+      cell.textContent=selected.rows[i][j];
+      row.appendChild(cell);
+    }
+    layoutRows.appendChild(row);
+  }
+  if(activeView==="layout"){
+    document.getElementById("target-value").textContent=selected.target;
+    document.getElementById("method-value").textContent=selected.method;
+    document.getElementById("limit-value").textContent=selected.limit;
+    if(!busy)resetProgress("Type the confirmation token to apply this layout.");
+    validateConfirmation();
+  }
+}
+
+function inspectSelectedFile(){
+  var file=selectedFile;
+  var epoch=++fileInspection;
+  if(!file){selectedFileFormat="";selectedRawLayout="";validateFile();return}
+  selectedFileFormat="pending";
+  selectedRawLayout="";
+  validateFile();
+  var reader=new FileReader();
+  reader.addEventListener("load",function(){
+    if(epoch!==fileInspection||file!==selectedFile)return;
+    var bytes=new Uint8Array(reader.result||new ArrayBuffer(0));
+    var fit=bytes.length>=4&&bytes[0]===0xd0&&bytes[1]===0x0d&&bytes[2]===0xfe&&bytes[3]===0xed;
+    var tar=bytes.length>=262&&bytes[257]===0x75&&bytes[258]===0x73&&bytes[259]===0x74&&bytes[260]===0x61&&bytes[261]===0x72;
+    if(!fit){selectedFileFormat=tar?"tar":"unknown";validateFile();return}
+    var pads=[7*1024*1024,32*1024*1024];
+    var matches=[false,false];
+    var complete=0;
+    for(let i=0;i<pads.length;i++){
+      var magicReader=new FileReader();
+      magicReader.addEventListener("load",function(){
+        if(epoch!==fileInspection||file!==selectedFile)return;
+        var magic=new Uint8Array(magicReader.result||new ArrayBuffer(0));
+        matches[i]=magic.length===4&&magic[0]===0x68&&magic[1]===0x73&&magic[2]===0x71&&magic[3]===0x73;
+        complete++;
+        if(complete===pads.length){
+          selectedFileFormat="raw";
+          selectedRawLayout=matches[0]?"mainline":matches[1]?"large":"unknown";
+          validateFile();
+        }
+      });
+      magicReader.addEventListener("error",function(){
+        if(epoch!==fileInspection)return;
+        complete++;
+        if(complete===pads.length){selectedFileFormat="raw";selectedRawLayout="unknown";validateFile()}
+      });
+      magicReader.readAsArrayBuffer(file.slice(pads[i],pads[i]+4));
+    }
+  });
+  reader.addEventListener("error",function(){
+    if(epoch!==fileInspection)return;
+    selectedFileFormat="unknown";
+    validateFile();
+  });
+  reader.readAsArrayBuffer(file.slice(0,512));
+}
+
 function fileError(){
   if(!selectedFile)return"";
-  if(activeView==="firmware"&&selectedFile.size<=32*1024*1024)return"Firmware must be larger than the 32 MiB kernel area.";
-  if(activeView==="firmware"&&selectedFile.size>1024*1024*1024)return"Firmware must not exceed 1 GiB.";
+  if(selectedFileFormat==="pending")return"";
+  if(selectedFileFormat==="unknown")return"Image must be a FIT-based raw image or an OpenWrt sysupgrade tar.";
+  if(activeView==="firmware"&&selectedFileFormat==="raw"&&selectedRawLayout==="unknown")return"Raw firmware has no SquashFS at a supported layout boundary.";
+  if(activeView==="firmware"&&selectedFileFormat==="raw"&&layoutProfiles[activeDiskLayout]&&selectedRawLayout!==activeDiskLayout)return"Raw firmware is for the "+selectedRawLayout+" layout, not the current "+activeDiskLayout+" layout.";
+  if(activeView==="firmware"&&selectedFileFormat==="raw"&&selectedFile.size<=firmwareKernelPad)return"Raw firmware must be larger than the "+formatBytes(firmwareKernelPad)+" kernel area.";
+  if(activeView==="firmware"&&selectedFile.size>firmwareMax)return"Firmware must not exceed "+formatBytes(firmwareMax)+".";
+  if(activeView==="uboot"&&selectedFileFormat!=="raw")return"Chainloader must be a raw FIT image.";
   if(activeView==="uboot"&&selectedFile.size>4*1024*1024)return"Chainloader must not exceed 4 MiB.";
   if(activeView==="uboot"&&selectedFile.size===0)return"Chainloader image is empty.";
   return"";
@@ -695,17 +847,24 @@ function validateFile(){
     fileName.textContent=selectedFile.name;
     fileName.className="file-name selected";
     fileSize.textContent=formatBytes(selectedFile.size);
-    if(error){
+    if(selectedFileFormat==="pending"){
+      fileHelp.textContent="Inspecting image format.";
+    }else if(error){
       fileHelp.textContent=error;
       fileHelp.classList.add("error");
     }else{
-      fileHelp.textContent="Ready.";
+      fileHelp.textContent=selectedFileFormat==="tar"?"OpenWrt sysupgrade tar ready.":"Raw FIT image ready.";
       fileHelp.classList.add("ok");
     }
   }
-  uploadButton.disabled=busy||!selectedFile||!!error;
+  if(activeView==="firmware"&&selectedFileFormat==="tar")
+    document.getElementById("action-note").textContent="kernel and root entries are streamed directly to their target partitions.";
+  else if(activeView==="firmware")
+    document.getElementById("action-note").textContent=profile().note;
+  uploadButton.disabled=busy||!selectedFile||selectedFileFormat==="pending"||!!error;
   if(!busy&&activeView!=="layout"){
     if(error)setState("Invalid","error",error);
+    else if(selectedFileFormat==="pending")setState("Inspecting","idle","Reading the image header.");
     else if(selectedFile)setState("Ready","success","Ready to upload.");
   }
 }
@@ -722,10 +881,11 @@ function setBusy(value){
   busy=value;
   chooseButton.disabled=value;
   confirmInput.disabled=value;
+  layoutSelect.disabled=value;
   partitionSelect.disabled=value||!partitionsLoaded;
   var buttons=document.querySelectorAll(".nav-button");
   for(var i=0;i<buttons.length;i++)buttons[i].disabled=value;
-  uploadButton.disabled=value||!selectedFile||!!fileError();
+  uploadButton.disabled=value||!selectedFile||selectedFileFormat==="pending"||!!fileError();
   repartitionButton.disabled=value||confirmInput.value!=="SBE1V1K_REPARTITION";
   backupButton.disabled=value||!partitionSelect.value;
 }
@@ -826,7 +986,7 @@ function setView(view){
     uploadButton.textContent=p.action;
     validateFile();
   }else if(layout){
-    validateConfirmation();
+    updateLayoutSelection();
   }else{
     updateBackupSelection();
   }
@@ -881,6 +1041,12 @@ async function pollStatus(epoch){
       setProgress("write",100,"complete");
       if(data.reboot)startCountdown(3);
       else{
+        if(activeView==="layout"){
+          if(layoutSelect.value==="mainline")configureActiveLayout("mainline",7*1024*1024,129*1024*1024);
+          else configureActiveLayout("large",32*1024*1024,1024*1024*1024);
+          partitionsLoaded=false;
+          loadPartitions();
+        }
         setState("Complete","success","eMMC migration complete. Upload firmware before rebooting.");
         setBusy(false);
       }
@@ -930,13 +1096,14 @@ function sendUpload(){
     setState("Network error","error","The destructive upload was interrupted. The target may not be bootable.");
     setBusy(false);
   });
-  xhr.open("POST","/upload/"+activeView,true);
+  xhr.open("POST","/upload/"+activeView+"?format="+selectedUploadFormat,true);
   xhr.setRequestHeader("Content-Type","application/octet-stream");
   xhr.send(selectedFile);
 }
 
 function upload(){
   if(!selectedFile||fileError()||activeView==="layout")return;
+  selectedUploadFormat=activeView==="firmware"&&selectedFileFormat==="tar"?"tar":"raw";
   setBusy(true);
   resetProgress("Preparing destructive upload.");
   pollEpoch++;
@@ -962,7 +1129,7 @@ function upload(){
     setState("Network error","error","The erase request was interrupted before streaming began.");
     setBusy(false);
   });
-  xhr.open("POST","/action/prepare/"+activeView,true);
+  xhr.open("POST","/action/prepare/"+activeView+"?format="+selectedUploadFormat,true);
   xhr.setRequestHeader("Content-Type","text/plain");
   xhr.send(String(selectedFile.size));
 }
@@ -993,7 +1160,7 @@ function repartition(){
     setState("Network error","error","Migration request was interrupted. Review the serial console.");
     setBusy(false);
   });
-  xhr.open("POST","/action/repartition",true);
+  xhr.open("POST","/action/repartition?layout="+layoutSelect.value,true);
   xhr.setRequestHeader("Content-Type","text/plain");
   xhr.send("SBE1V1K_REPARTITION");
   startPolling();
@@ -1020,7 +1187,7 @@ for(var i=0;i<navButtons.length;i++)navButtons[i].addEventListener("click",funct
   setView(view);
 });
 chooseButton.addEventListener("click",function(){if(!busy)fileInput.click()});
-fileInput.addEventListener("change",function(){selectedFile=this.files[0]||null;validateFile()});
+fileInput.addEventListener("change",function(){selectedFile=this.files[0]||null;inspectSelectedFile()});
 var filePicker=document.querySelector(".file-picker");
 filePicker.addEventListener("dragover",function(event){
   event.preventDefault();
@@ -1032,11 +1199,12 @@ filePicker.addEventListener("drop",function(event){
   filePicker.classList.remove("dragover");
   if(busy||activeView==="layout"||activeView==="backup")return;
   var files=event.dataTransfer&&event.dataTransfer.files;
-  if(files&&files[0]){selectedFile=files[0];validateFile()}
+  if(files&&files[0]){selectedFile=files[0];inspectSelectedFile()}
 });
 uploadButton.addEventListener("click",upload);
 confirmInput.addEventListener("input",validateConfirmation);
 repartitionButton.addEventListener("click",repartition);
+layoutSelect.addEventListener("change",updateLayoutSelection);
 partitionSelect.addEventListener("change",updateBackupSelection);
 backupButton.addEventListener("click",downloadBackup);
 window.addEventListener("beforeunload",function(event){
@@ -1059,6 +1227,9 @@ window.addEventListener("hashchange",function(){
     if(data&&data.u_boot){
       document.getElementById("side-version").textContent=data.u_boot;
       document.getElementById("footer-version").textContent=data.u_boot;
+      configureActiveLayout(data.layout,Number(data.kernel_pad),Number(data.firmware_max));
+      if(layoutProfiles[data.layout])layoutSelect.value=data.layout;
+      if(!busy)setView(activeView);
     }
   }catch(error){}
 })();
