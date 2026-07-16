@@ -102,7 +102,7 @@ static bool recovery_board_is_sbe1v1k(void)
 #define RECOVERY_KERNEL_PAD_SIZE    (7000 * 1024UL)
 #define RECOVERY_MMC_WRITE_CHUNK    (1024 * 1024UL)
 #define RECOVERY_MMC_STREAM_CHUNK   (1024 * 1024UL)
-#define RECOVERY_MMC_BACKUP_CHUNK   (64 * 1024UL)
+#define RECOVERY_MMC_BACKUP_CHUNK   (16 * 1024 * 1024UL)
 #define RECOVERY_MMC_ERASE_CHUNK    (32 * 1024 * 1024ULL)
 #define RECOVERY_MMC_ERASE_PROGRESS_STEPS 1000U
 #define RECOVERY_SQUASHFS_MAGIC      0x73717368U
@@ -4767,6 +4767,7 @@ static int recovery_open_backup(struct fs_file *file, const char *path)
 	struct blk_desc *desc;
 	char filename[PART_NAME_LEN + 1];
 	unsigned long long bytes;
+	lbaint_t cache_blocks;
 	size_t cache_capacity;
 	int number;
 	int ret;
@@ -4802,13 +4803,15 @@ static int recovery_open_backup(struct fs_file *file, const char *path)
 		return recovery_http_error(file, "500 Internal Server Error",
 					   "Invalid eMMC block size.\n");
 	}
-	cache_capacity = RECOVERY_MMC_BACKUP_CHUNK / backup->blksz *
-			 backup->blksz;
-	if (!cache_capacity) {
+	cache_blocks = RECOVERY_MMC_BACKUP_CHUNK / backup->blksz;
+	if (!cache_blocks) {
 		free(backup);
 		return recovery_http_error(file, "500 Internal Server Error",
-					   "eMMC block size exceeds backup buffer.\n");
+						   "eMMC block size exceeds backup buffer.\n");
 	}
+	if (cache_blocks > part.size)
+		cache_blocks = part.size;
+	cache_capacity = cache_blocks * backup->blksz;
 	backup->cache = memalign(ARCH_DMA_MINALIGN, cache_capacity);
 	if (!backup->cache) {
 		free(backup);

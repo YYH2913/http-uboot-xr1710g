@@ -170,9 +170,10 @@ a raw image. `GET /partitions` returns the live partition metadata, and
 `GET /backup/partition-N.bin` streams partition number `N` with an exact 64-bit
 `Content-Length` and a partition-specific filename.
 
-Backup reads use a fixed 64 KiB aligned buffer, so `rootfs_data` and other
-partitions larger than 2 GiB do not require a RAM-sized staging image. Backup
-streams and destructive upload or repartition requests are mutually exclusive.
+Backup reads use an aligned buffer of up to 16 MiB; smaller partitions allocate
+only their actual size. Therefore, `rootfs_data` and other partitions larger
+than 2 GiB do not require a RAM-sized staging image. Backup streams and
+destructive upload or repartition requests are mutually exclusive.
 Raw factory partitions can contain credentials, calibration data, and
 device-specific keys; store the downloaded files securely.
 
