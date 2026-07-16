@@ -398,6 +398,7 @@ static int rtl8211f_startup(struct phy_device *phydev)
 
 #define RTL8261BE_PHY_ID		0x001ccaf3
 #define RTL8261BE_PHY_ID_MASK		0xffffffff
+#define RTL8261BE_PHY_ID2		0xcaf3
 #define RTL8261BE_CHIP_ID_REG		0x0104
 #define RTL8261BE_CHIP_ID_MASK		0xffc0
 #define RTL8261BE_CHIP_ID		0x1140
@@ -880,16 +881,20 @@ static int rtl8261be_restart_aneg(struct phy_device *phydev)
 
 static int rtl8261be_config(struct phy_device *phydev)
 {
-	int chip_id, control, ret;
+	int chip_id, phy_id2, control, ret;
 
-	if (!phydev->is_c45)
-		return -ENODEV;
+	/* RTL8261BE exposes a valid Clause 22 ID but uses Clause 45 registers. */
+	phydev->is_c45 = true;
 
 	chip_id = phy_read(phydev, MDIO_MMD_VEND1, RTL8261BE_CHIP_ID_REG);
-	if (chip_id < 0)
-		return chip_id;
-	if ((chip_id & RTL8261BE_CHIP_ID_MASK) != RTL8261BE_CHIP_ID)
+	phy_id2 = phy_read(phydev, MDIO_DEVAD_NONE, MII_PHYSID2);
+	if ((chip_id < 0 ||
+	     (chip_id & RTL8261BE_CHIP_ID_MASK) != RTL8261BE_CHIP_ID) &&
+	    phy_id2 != RTL8261BE_PHY_ID2) {
+		printf("RTL8261BE addr 0x%x has unexpected IDs: C45 %d, C22 0x%04x\n",
+		       phydev->addr, chip_id, phy_id2 & 0xffff);
 		return -ENODEV;
+	}
 
 	ret = phy_write(phydev, MDIO_MMD_VEND1, RTL8261BE_EXT_RESET, 1);
 	if (ret)
