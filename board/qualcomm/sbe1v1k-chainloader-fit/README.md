@@ -167,15 +167,27 @@ large rootfs/rootfs_data partitions previously overwrote.
 
 ## HTTP Partition Backup
 
-The recovery page lists the current eMMC GPT and can download any partition as
-a raw image. `GET /partitions` returns the live partition metadata, and
-`GET /backup/partition-N.bin` streams partition number `N` with an exact 64-bit
-`Content-Length` and a partition-specific filename.
+The recovery page lists the two eMMC hardware boot areas and the current GPT.
+`GET /partitions` returns metadata and a download path for every listed source.
+`GET /backup/boot0.bin`, `GET /backup/boot1.bin`, and
+`GET /backup/partition-N.bin` stream one raw source with an exact 64-bit
+`Content-Length` and a source-specific filename.
 
-Backup reads use an aligned buffer of up to 16 MiB; smaller partitions allocate
-only their actual size. Therefore, `rootfs_data` and other partitions larger
-than 2 GiB do not require a RAM-sized staging image. Backup streams and
-destructive upload or repartition requests are mutually exclusive.
+`GET /backup/all.tar` generates one uncompressed ustar archive containing
+`emmc-boot0.img`, `emmc-boot1.img`, and one `pNN-name.img` member for every
+valid GPT partition. The tar header, partition data, alignment padding, and end
+markers are produced while the response is sent; the complete archive is never
+staged in RAM. RPMB is deliberately excluded because it is an authenticated
+eMMC region rather than a normal raw block partition. The archive can approach
+the total size of all allocated GPT partitions, so the receiving disk needs
+enough free space.
+
+Backup reads use an aligned buffer of up to 16 MiB; smaller single-source
+backups allocate only their actual size. Therefore, `rootfs_data` and other
+partitions larger than 2 GiB do not require a RAM-sized staging image. Only one
+backup connection may be active at a time. The selected eMMC hardware area is
+restored to the user area when a download finishes, fails, or is closed, and
+backup streams remain mutually exclusive with upload or repartition requests.
 Raw factory partitions can contain credentials, calibration data, and
 device-specific keys; store the downloaded files securely.
 

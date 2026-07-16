@@ -538,6 +538,7 @@ button{touch-action:manipulation}
           <div class="actions">
             <p class="action-note">Read-only; nothing is modified.</p>
             <button class="primary-button" id="backup-button" type="button" disabled>Download partition</button>
+            <button class="primary-button" id="backup-all-button" type="button" disabled>Download all (.tar)</button>
           </div>
         </div>
 
@@ -683,6 +684,7 @@ var layoutSelect=document.getElementById("layout-select");
 var layoutRows=document.getElementById("layout-rows");
 var partitionSelect=document.getElementById("partition-select");
 var backupButton=document.getElementById("backup-button");
+var backupAllButton=document.getElementById("backup-all-button");
 var backupHelp=document.getElementById("backup-help");
 var state=document.getElementById("state");
 var statusMessage=document.getElementById("status-message");
@@ -888,11 +890,12 @@ function setBusy(value){
   uploadButton.disabled=value||!selectedFile||selectedFileFormat==="pending"||!!fileError();
   repartitionButton.disabled=value||confirmInput.value!=="SBE1V1K_REPARTITION";
   backupButton.disabled=value||!partitionSelect.value;
+  backupAllButton.disabled=value||!partitionsLoaded||!partitions.length;
 }
 
 function selectedPartition(){
-  var number=Number(partitionSelect.value);
-  for(var i=0;i<partitions.length;i++)if(partitions[i].number===number)return partitions[i];
+  var id=partitionSelect.value;
+  for(var i=0;i<partitions.length;i++)if(partitions[i].id===id)return partitions[i];
   return null;
 }
 
@@ -904,14 +907,15 @@ function updateBackupSelection(){
     document.getElementById("target-value").textContent="Select a partition";
     document.getElementById("limit-value").textContent=partitionsLoaded?"Not selected":"Loading GPT";
     if(partitionsLoaded){
-      backupHelp.textContent="Choose one partition from the current GPT.";
+      backupHelp.textContent="Choose one eMMC area or GPT partition.";
       setState("Idle","idle","Choose a partition to download.");
     }
     return;
   }
-  document.getElementById("target-value").textContent="P"+part.number+" / "+part.name;
+  var target=part.kind==="hardware"?part.name:"P"+part.number+" / "+part.name;
+  document.getElementById("target-value").textContent=target;
   document.getElementById("limit-value").textContent=formatBytes(part.size);
-  backupHelp.textContent="Starts at LBA "+part.start+"; "+part.blocks+" logical blocks.";
+  backupHelp.textContent=(part.kind==="hardware"?"Hardware boot area; ":"Starts at LBA "+part.start+"; ")+part.blocks+" logical blocks.";
   backupHelp.classList.add("ok");
   setState("Ready","success","Partition is ready for a read-only download.");
 }
@@ -931,12 +935,13 @@ async function loadPartitions(){
     for(var i=0;i<partitions.length;i++){
       var part=partitions[i];
       var option=document.createElement("option");
-      option.value=String(part.number);
-      option.textContent="P"+part.number+" | "+part.name+" | "+formatBytes(part.size);
+      option.value=part.id;
+      option.textContent=(part.kind==="hardware"?part.name:"P"+part.number+" | "+part.name)+" | "+formatBytes(part.size);
       partitionSelect.appendChild(option);
     }
     partitionsLoaded=true;
     partitionSelect.disabled=busy||!partitions.length;
+    backupAllButton.disabled=busy||!partitions.length;
     if(activeView==="backup")updateBackupSelection();
   }catch(error){
     partitionsLoaded=false;
@@ -945,6 +950,7 @@ async function loadPartitions(){
     failed.textContent="Partition table unavailable";
     partitionSelect.appendChild(failed);
     partitionSelect.disabled=true;
+    backupAllButton.disabled=true;
     backupHelp.textContent="Could not read the eMMC partition table. Review the serial console.";
     backupHelp.className="backup-help error";
     if(activeView==="backup")setState("Unavailable","error","The eMMC partition table could not be loaded.");
@@ -1170,13 +1176,26 @@ function downloadBackup(){
   var part=selectedPartition();
   if(!part||busy)return;
   var link=document.createElement("a");
-  link.href="/backup/partition-"+part.number+".bin";
+  link.href=part.path;
   link.style.display="none";
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
   setState("Downloading","working","The raw partition stream has started. Keep this recovery page open.");
-  backupHelp.textContent="Streaming P"+part.number+" / "+part.name+" to the browser.";
+  backupHelp.textContent="Streaming "+(part.kind==="hardware"?part.name:"P"+part.number+" / "+part.name)+" to the browser.";
+  backupHelp.className="backup-help ok";
+}
+
+function downloadAllBackups(){
+  if(busy||!partitionsLoaded||!partitions.length)return;
+  var link=document.createElement("a");
+  link.href="/backup/all.tar";
+  link.style.display="none";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setState("Downloading","working","The full eMMC partition archive has started.");
+  backupHelp.textContent="Streaming boot0, boot1 and all GPT partitions to one tar archive.";
   backupHelp.className="backup-help ok";
 }
 
@@ -1207,6 +1226,7 @@ repartitionButton.addEventListener("click",repartition);
 layoutSelect.addEventListener("change",updateLayoutSelection);
 partitionSelect.addEventListener("change",updateBackupSelection);
 backupButton.addEventListener("click",downloadBackup);
+backupAllButton.addEventListener("click",downloadAllBackups);
 window.addEventListener("beforeunload",function(event){
   if(!busy)return;
   event.preventDefault();
