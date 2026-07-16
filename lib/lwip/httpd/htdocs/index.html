@@ -6,7 +6,7 @@
 <title>SBE1V1K Recovery Console</title>
 <style>
 :root{
-  color-scheme:light;
+  color-scheme:light dark;
   --page:#edf0f2;
   --surface:#ffffff;
   --sidebar:#171c1f;
@@ -18,6 +18,14 @@
   --line:#d8dde0;
   --line-strong:#bcc5c9;
   --soft:#f5f7f7;
+  --control:#ffffff;
+  --picker:#fafbfb;
+  --track:#e5e9ea;
+  --fill-idle:#8d999e;
+  --row-line:#e7eaeb;
+  --state-ink:#596368;
+  --state-bg:#edf0f1;
+  --shadow:0 10px 28px rgba(31,43,49,.08);
   --accent:#c94f2d;
   --accent-dark:#a83e21;
   --accent-soft:#fff0eb;
@@ -25,8 +33,48 @@
   --green-soft:#e8f4ed;
   --amber:#91621d;
   --amber-soft:#fff6df;
+  --warn-line:#e2c37e;
+  --warn-mark:#c69a41;
+  --warn-head:#765019;
+  --warn-body:#7d622f;
   --danger:#a63d35;
   --danger-soft:#fcecea;
+  --footer-ink:#7b8589;
+}
+@media(prefers-color-scheme:dark){
+  :root{
+    --page:#101416;
+    --surface:#191f22;
+    --sidebar:#0c0f11;
+    --sidebar-line:#252c30;
+    --ink:#e3e8ea;
+    --muted:#8e999e;
+    --line:#2b3236;
+    --line-strong:#394247;
+    --soft:#1e2528;
+    --control:#12171a;
+    --picker:#151b1e;
+    --track:#2b3236;
+    --fill-idle:#5a656b;
+    --row-line:#242b2f;
+    --state-ink:#9aa5aa;
+    --state-bg:#232a2e;
+    --shadow:0 10px 28px rgba(0,0,0,.35);
+    --accent:#e06a45;
+    --accent-dark:#c94f2d;
+    --accent-soft:#33211b;
+    --green:#5bbd8b;
+    --green-soft:#18302a;
+    --amber:#d3a04e;
+    --amber-soft:#2b2415;
+    --warn-line:#5c4c22;
+    --warn-mark:#a8823f;
+    --warn-head:#dfc084;
+    --warn-body:#c2ab77;
+    --danger:#e0685e;
+    --danger-soft:#331d1b;
+    --footer-ink:#727d82;
+  }
 }
 *{box-sizing:border-box}
 html,body{min-height:100%;margin:0}
@@ -132,7 +180,7 @@ button{touch-action:manipulation}
   border:1px solid var(--line-strong);
   border-radius:8px;
   background:var(--surface);
-  box-shadow:0 10px 28px rgba(31,43,49,.08);
+  box-shadow:var(--shadow);
 }
 .surface-head{
   display:flex;
@@ -154,8 +202,8 @@ button{touch-action:manipulation}
   flex:0 0 auto;
   padding:5px 10px;
   border-radius:5px;
-  color:#596368;
-  background:#edf0f1;
+  color:var(--state-ink);
+  background:var(--state-bg);
   font-size:11px;
   font-weight:730;
 }
@@ -184,7 +232,12 @@ button{touch-action:manipulation}
   overflow:hidden;
   border:1px solid var(--line-strong);
   border-radius:7px;
-  background:#fafbfb;
+  background:var(--picker);
+}
+.file-picker.dragover{border-color:var(--accent);background:var(--accent-soft)}
+:is(.nav-button,.choose-button,.primary-button,.danger-button,.confirm-input,.partition-select):focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
 }
 .choose-button{
   align-self:stretch;
@@ -192,7 +245,7 @@ button{touch-action:manipulation}
   border:0;
   border-right:1px solid var(--line);
   color:var(--ink);
-  background:#ffffff;
+  background:var(--control);
   cursor:pointer;
   font-weight:680;
 }
@@ -210,7 +263,7 @@ button{touch-action:manipulation}
   gap:11px;
   margin-top:22px;
   padding:14px 16px;
-  border:1px solid #e2c37e;
+  border:1px solid var(--warn-line);
   border-radius:7px;
   background:var(--amber-soft);
 }
@@ -220,13 +273,13 @@ button{touch-action:manipulation}
   display:flex;
   align-items:center;
   justify-content:center;
-  border:1px solid #c69a41;
+  border:1px solid var(--warn-mark);
   border-radius:50%;
   color:var(--amber);
   font-weight:800;
 }
-.warning strong{display:block;color:#765019;font-size:12px}
-.warning p{margin:3px 0 0;color:#7d622f;font-size:12px}
+.warning strong{display:block;color:var(--warn-head);font-size:12px}
+.warning p{margin:3px 0 0;color:var(--warn-body);font-size:12px}
 .actions{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:22px}
 .action-note{margin:0;color:var(--muted);font-size:12px}
 .primary-button,.danger-button{
@@ -256,11 +309,11 @@ button{touch-action:manipulation}
   grid-template-columns:62px minmax(0,1fr) 46px;
   align-items:center;
   gap:12px;
-  border-top:1px solid #e7eaeb;
+  border-top:1px solid var(--row-line);
 }
 .progress-label{font-size:12px;font-weight:680}
-.progress-track{height:7px;overflow:hidden;border-radius:4px;background:#e5e9ea}
-.progress-fill{width:0;height:100%;border-radius:4px;background:#8d999e;transition:width .22s ease}
+.progress-track{height:7px;overflow:hidden;border-radius:4px;background:var(--track)}
+.progress-fill{width:0;height:100%;border-radius:4px;background:var(--fill-idle);transition:width .22s ease}
 .progress-row.active .progress-fill{background:var(--accent);animation:pulse 1.15s ease-in-out infinite}
 .progress-row.complete .progress-fill{background:var(--green)}
 .progress-percent{text-align:right;color:var(--muted);font:11px ui-monospace,SFMono-Regular,Consolas,monospace}
@@ -295,7 +348,7 @@ button{touch-action:manipulation}
   border:1px solid var(--line-strong);
   border-radius:7px;
   color:var(--ink);
-  background:#ffffff;
+  background:var(--control);
   outline:none;
 }
 .confirm-input:focus{border-color:var(--danger);box-shadow:0 0 0 3px rgba(166,61,53,.09)}
@@ -308,7 +361,7 @@ button{touch-action:manipulation}
   border:1px solid var(--line-strong);
   border-radius:7px;
   color:var(--ink);
-  background:#ffffff;
+  background:var(--control);
   outline:none;
   cursor:pointer;
 }
@@ -317,7 +370,7 @@ button{touch-action:manipulation}
 .backup-help{min-height:20px;margin:8px 0 0;color:var(--muted);font-size:12px}
 .backup-help.error{color:var(--danger)}
 .backup-help.ok{color:var(--green)}
-.footer{padding:14px 3px 0;color:#7b8589;font-size:11px;text-align:right}
+.footer{padding:14px 3px 0;color:var(--footer-ink);font-size:11px;text-align:right}
 [hidden]{display:none!important}
 @keyframes page-in{from{transform:translateY(6px)}to{transform:none}}
 @keyframes view-in{from{transform:translateX(5px)}to{transform:none}}
@@ -388,10 +441,10 @@ button{touch-action:manipulation}
     <div class="main-inner">
       <header class="topbar">
         <div>
-          <p class="topbar-label">Device maintenance</p>
-          <p class="topbar-title">Boot recovery environment</p>
+          <p class="topbar-label">SBE1V1K</p>
+          <p class="topbar-title">Recovery</p>
         </div>
-        <div class="endpoint">Recovery endpoint<strong>192.168.255.1</strong></div>
+        <div class="endpoint">Endpoint<strong>192.168.255.1</strong></div>
       </header>
 
       <section class="surface">
@@ -399,15 +452,15 @@ button{touch-action:manipulation}
           <div>
             <p class="eyebrow" id="eyebrow">Firmware recovery</p>
             <h1 id="view-title">System firmware</h1>
-            <p id="view-copy">Replace the OpenWrt kernel and root filesystem from a raw SBE1V1K sysupgrade image.</p>
+            <p id="view-copy">Flash an OpenWrt sysupgrade image.</p>
           </div>
           <span class="state" id="state" data-tone="idle">Idle</span>
         </header>
 
         <div class="facts" id="facts">
           <div class="fact"><span class="fact-label">Target</span><span class="fact-value" id="target-value">kernel + rootfs</span></div>
-          <div class="fact"><span class="fact-label" id="method-label">Write mode</span><span class="fact-value" id="method-value">Erase first, direct stream</span></div>
-          <div class="fact"><span class="fact-label" id="limit-label">Image limit</span><span class="fact-value" id="limit-value">32 MiB + 1 byte to 1 GiB</span></div>
+          <div class="fact"><span class="fact-label" id="method-label">Mode</span><span class="fact-value" id="method-value">Erase, then write</span></div>
+          <div class="fact"><span class="fact-label" id="limit-label">Size</span><span class="fact-value" id="limit-value">32 MiB – 1 GiB</span></div>
         </div>
 
         <div class="workspace upload-view" id="upload-view">
@@ -418,24 +471,24 @@ button{touch-action:manipulation}
             <span class="file-name" id="file-name">No file selected</span>
             <span class="file-size" id="file-size"></span>
           </div>
-          <p class="file-help" id="file-help">Select a raw SBE1V1K sysupgrade image.</p>
+          <p class="file-help" id="file-help">Select a sysupgrade image.</p>
 
           <div class="warning">
             <span class="warning-mark">!</span>
             <div>
               <strong>Destructive operation</strong>
-              <p id="warning-copy">kernel, rootfs, and rootfs_data are erased before upload data is written. Interrupted uploads are not recoverable from the target partitions.</p>
+              <p id="warning-copy">Target partitions are erased before writing. Do not power off.</p>
             </div>
           </div>
 
           <div class="actions">
-            <p class="action-note" id="action-note">The first 32 MiB is written to kernel; the remainder is written to rootfs.</p>
+            <p class="action-note" id="action-note">First 32 MiB → kernel, rest → rootfs.</p>
             <button class="primary-button" id="upload-button" type="button" disabled>Upload firmware</button>
           </div>
         </div>
 
         <div class="workspace layout-view" id="layout-view" hidden>
-          <p class="layout-copy">Migration preserves every existing partition before LBA 110626 and rebuilds the OpenWrt tail layout shown below.</p>
+          <p class="layout-copy">Partitions before LBA 110626 are preserved; the tail is rebuilt as shown.</p>
           <div class="partition-scroll">
             <div class="partition-table" role="table" aria-label="Target eMMC layout">
               <div class="partition-row header" role="row"><span>Name</span><span>Start LBA</span><span>Size</span><span>Purpose</span></div>
@@ -449,14 +502,14 @@ button{touch-action:manipulation}
           <div class="warning">
             <span class="warning-mark">!</span>
             <div>
-              <strong>Factory migration erases the current tail layout</strong>
-              <p>The running chainloader and APPSBLENV are written into the new layout. Upload firmware before leaving recovery.</p>
+              <strong>Erases the current tail layout</strong>
+              <p>Upload firmware before rebooting.</p>
             </div>
           </div>
 
           <div class="migration">
             <div>
-              <label class="confirm-label" for="confirm-input">Enter SBE1V1K_REPARTITION to confirm</label>
+              <label class="confirm-label" for="confirm-input">Type SBE1V1K_REPARTITION to confirm</label>
               <input class="confirm-input" id="confirm-input" type="text" autocomplete="off" spellcheck="false" placeholder="SBE1V1K_REPARTITION">
             </div>
             <button class="danger-button" id="repartition-button" type="button" disabled>Repartition eMMC</button>
@@ -464,29 +517,29 @@ button{touch-action:manipulation}
         </div>
 
         <div class="workspace backup-view" id="backup-view" hidden>
-          <label class="backup-label" for="partition-select">Source partition</label>
+          <label class="backup-label" for="partition-select">Partition</label>
           <select class="partition-select" id="partition-select" disabled>
-            <option value="">Loading partition table...</option>
+            <option value="">Loading...</option>
           </select>
-          <p class="backup-help" id="backup-help">Reading the current eMMC GPT.</p>
+          <p class="backup-help" id="backup-help">Reading partition table.</p>
 
           <div class="warning">
             <span class="warning-mark">!</span>
             <div>
-              <strong>Device-specific backup</strong>
-              <p>Raw partitions can contain MAC addresses, calibration data, credentials, and device keys. Store downloaded images securely.</p>
+              <strong>Sensitive data</strong>
+              <p>Backups may contain MAC addresses, keys and calibration data.</p>
             </div>
           </div>
 
           <div class="actions">
-            <p class="action-note">Data is read from eMMC and streamed directly to the browser without a RAM-sized staging image.</p>
+            <p class="action-note">Read-only; nothing is modified.</p>
             <button class="primary-button" id="backup-button" type="button" disabled>Download partition</button>
           </div>
         </div>
 
         <section class="progress-section" id="progress-section" aria-label="Operation progress">
           <div class="progress-inner">
-            <div class="progress-head"><strong>Operation progress</strong><span id="progress-detail"></span></div>
+            <div class="progress-head"><strong>Progress</strong><span id="progress-detail"></span></div>
             <p class="status-message" id="status-message">Select an image to begin.</p>
             <div class="progress-row" id="row-upload">
               <span class="progress-label">Upload</span>
@@ -525,50 +578,50 @@ var profiles={
   firmware:{
     eyebrow:"Firmware recovery",
     title:"System firmware",
-    copy:"Replace the OpenWrt kernel and root filesystem from an SBE1V1K recovery image.",
+    copy:"Flash an OpenWrt sysupgrade image.",
     target:"kernel + rootfs",
-    methodLabel:"Write mode",
-    method:"Erase first, direct stream",
-    limitLabel:"Image limit",
-    limit:"32 MiB + 1 byte to 1 GiB",
-    help:"Select the SBE1V1K squashfs-recovery.bin image.",
-    warning:"kernel, rootfs, and rootfs_data are erased before upload data is written. Interrupted uploads are not recoverable from the target partitions.",
-    note:"The first 32 MiB is written to kernel; the remainder is written to rootfs.",
+    methodLabel:"Mode",
+    method:"Erase, then write",
+    limitLabel:"Size",
+    limit:"32 MiB – 1 GiB",
+    help:"Select a sysupgrade image.",
+    warning:"kernel, rootfs and rootfs_data are erased before writing. Do not power off.",
+    note:"First 32 MiB → kernel, rest → rootfs.",
     action:"Upload firmware"
   },
   uboot:{
     eyebrow:"Bootloader recovery",
     title:"Chainloader",
-    copy:"Replace the second-stage SBE1V1K chainloader with a raw FIT image.",
+    copy:"Flash a chainloader FIT image.",
     target:"chainloader",
-    methodLabel:"Write mode",
-    method:"Erase first, direct stream",
-    limitLabel:"Image limit",
+    methodLabel:"Mode",
+    method:"Erase, then write",
+    limitLabel:"Size",
     limit:"Up to 4 MiB",
-    help:"Select a raw SBE1V1K chainloader FIT.",
-    warning:"chainloader is erased before upload data is written. A failed transfer can prevent the second-stage recovery environment from booting.",
-    note:"The OpenWrt kernel, rootfs, and rootfs_data partitions are not modified.",
+    help:"Select a chainloader FIT.",
+    warning:"chainloader is erased before writing. A failed transfer can break recovery boot.",
+    note:"Other partitions are not modified.",
     action:"Upload chainloader"
   },
   layout:{
     eyebrow:"Storage migration",
     title:"eMMC layout",
-    copy:"Replace the factory tail partition map with the SBE1V1K OpenWrt layout.",
+    copy:"Rebuild the tail partition map for OpenWrt.",
     target:"eMMC user area",
-    methodLabel:"Write mode",
-    method:"Preserve prefix, rebuild tail",
+    methodLabel:"Mode",
+    method:"Keep prefix, rebuild tail",
     limitLabel:"Boundary",
-    limit:"Starts at LBA 110626"
+    limit:"LBA 110626"
   },
   backup:{
     eyebrow:"Partition backup",
-    title:"Download eMMC partition",
-    copy:"Create a raw image of any partition in the current GPT without modifying storage.",
+    title:"Download partition",
+    copy:"Save a raw copy of any partition.",
     target:"Select a partition",
-    methodLabel:"Read mode",
-    method:"Direct read stream",
-    limitLabel:"Partition size",
-    limit:"Loading GPT"
+    methodLabel:"Mode",
+    method:"Read-only",
+    limitLabel:"Size",
+    limit:"Loading"
   }
 };
 
@@ -627,7 +680,7 @@ function resetProgress(message){
   document.getElementById("progress-detail").textContent="";
   countdownStarted=false;
   uploadStarted=false;
-  setState("Idle","idle",message||(activeView==="layout"?"Enter the confirmation token to continue.":"Select an image to begin."));
+  setState("Idle","idle",message||(activeView==="layout"?"Type the confirmation token to continue.":"Select an image to begin."));
 }
 
 function validateFile(){
@@ -646,22 +699,22 @@ function validateFile(){
       fileHelp.textContent=error;
       fileHelp.classList.add("error");
     }else{
-      fileHelp.textContent="Image ready for destructive upload.";
+      fileHelp.textContent="Ready.";
       fileHelp.classList.add("ok");
     }
   }
   uploadButton.disabled=busy||!selectedFile||!!error;
   if(!busy&&activeView!=="layout"){
     if(error)setState("Invalid","error",error);
-    else if(selectedFile)setState("Ready","success","Image ready. Target partitions will be erased when upload starts.");
+    else if(selectedFile)setState("Ready","success","Ready to upload.");
   }
 }
 
 function validateConfirmation(){
   repartitionButton.disabled=busy||confirmInput.value!=="SBE1V1K_REPARTITION";
   if(!busy&&activeView==="layout"&&confirmInput.value){
-    if(repartitionButton.disabled)setState("Confirm","error","Confirmation token does not match.");
-    else setState("Ready","success","Factory migration is ready to start.");
+    if(repartitionButton.disabled)setState("Confirm","error","Token does not match.");
+    else setState("Ready","success","Ready to repartition.");
   }
 }
 
@@ -968,11 +1021,33 @@ for(var i=0;i<navButtons.length;i++)navButtons[i].addEventListener("click",funct
 });
 chooseButton.addEventListener("click",function(){if(!busy)fileInput.click()});
 fileInput.addEventListener("change",function(){selectedFile=this.files[0]||null;validateFile()});
+var filePicker=document.querySelector(".file-picker");
+filePicker.addEventListener("dragover",function(event){
+  event.preventDefault();
+  if(!busy&&activeView!=="layout"&&activeView!=="backup")filePicker.classList.add("dragover");
+});
+filePicker.addEventListener("dragleave",function(){filePicker.classList.remove("dragover")});
+filePicker.addEventListener("drop",function(event){
+  event.preventDefault();
+  filePicker.classList.remove("dragover");
+  if(busy||activeView==="layout"||activeView==="backup")return;
+  var files=event.dataTransfer&&event.dataTransfer.files;
+  if(files&&files[0]){selectedFile=files[0];validateFile()}
+});
 uploadButton.addEventListener("click",upload);
 confirmInput.addEventListener("input",validateConfirmation);
 repartitionButton.addEventListener("click",repartition);
 partitionSelect.addEventListener("change",updateBackupSelection);
 backupButton.addEventListener("click",downloadBackup);
+window.addEventListener("beforeunload",function(event){
+  if(!busy)return;
+  event.preventDefault();
+  event.returnValue="";
+});
+window.addEventListener("hashchange",function(){
+  var view=location.hash.substring(1);
+  if(!busy&&profiles[view]&&view!==activeView)setView(view);
+});
 
 (async function(){
   var requested=location.hash.substring(1);
