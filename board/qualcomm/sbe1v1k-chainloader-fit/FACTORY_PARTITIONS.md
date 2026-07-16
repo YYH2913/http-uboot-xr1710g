@@ -144,9 +144,11 @@ In the HTTP page, run `Repartition factory eMMC` with confirmation token:
 SBE1V1K_REPARTITION
 ```
 
-The action verifies the factory GPT, writes the migration GPT, writes the
-running FIT from `0x80000000` into `chainloader`, and updates `0:APPSBLENV`
-with `fw_setenv`-equivalent variable changes while preserving other entries.
+The action verifies the factory GPT, preserves the running FIT from
+`0x44000000` or `0x80000000` (falling back to the current eMMC chainloader
+partition), writes the migration GPT and selected chainloader target, and
+updates `0:APPSBLENV` with `fw_setenv`-equivalent variable changes while
+preserving other entries.
 The APPSBLENV partition is read back after writing so the migration fails if
 the expected variables did not persist.
 

@@ -127,6 +127,8 @@ static bool recovery_board_is_sbe1v1k(void)
 #define RECOVERY_SBE1V1K_MAINLINE_DATA_SIZE    1048576ULL
 #define RECOVERY_SBE1V1K_MAINLINE_UBOOT_START  5201954ULL
 #define RECOVERY_SBE1V1K_MAINLINE_UBOOT_SIZE   65536ULL
+#define RECOVERY_SBE1V1K_FIT_TFTP_ADDR         0x80000000UL
+#define RECOVERY_SBE1V1K_FIT_PERSISTENT_ADDR   0x44000000UL
 #define RECOVERY_GPT_TYPE_BASIC_DATA       "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
 #define RECOVERY_GPT_TYPE_LINUX_FS         "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
 
@@ -3038,17 +3040,19 @@ static bool recovery_is_sbe1v1k_chainloader_fit(const void *fit,
 	       recovery_fit_has_image_node(fit, "uboot-1");
 }
 
-static int recovery_find_running_chainloader_fit(const void **fitp,
+static int recovery_copy_running_chainloader_fit(void **fitp,
 						 size_t *fit_sizep)
 {
-	ulong candidates[] = {
-		0x80000000UL,
+	const ulong candidates[] = {
+		RECOVERY_SBE1V1K_FIT_PERSISTENT_ADDR,
+		RECOVERY_SBE1V1K_FIT_TFTP_ADDR,
 	};
 	unsigned long max = recovery_uboot_limit();
 	size_t i, j;
 
 	for (i = 0; i < ARRAY_SIZE(candidates); i++) {
 		const void *fit;
+		void *copy;
 		size_t fit_size;
 		ulong addr = candidates[i];
 
@@ -3073,15 +3077,126 @@ static int recovery_find_running_chainloader_fit(const void **fitp,
 		if (!recovery_is_sbe1v1k_chainloader_fit(fit, fit_size))
 			continue;
 
-		*fitp = fit;
+		copy = malloc(fit_size);
+		if (!copy)
+			return -ENOMEM;
+		memcpy(copy, fit, fit_size);
+		if (!recovery_is_sbe1v1k_chainloader_fit(copy, fit_size)) {
+			free(copy);
+			continue;
+		}
+
+		*fitp = copy;
 		*fit_sizep = fit_size;
-		printf("Found running SBE1V1K chainloader FIT at 0x%08lx (%lu bytes)\n",
+		printf("Preserved running SBE1V1K chainloader FIT from 0x%08lx (%lu bytes)\n",
 		       addr, (ulong)fit_size);
 		return 0;
 	}
 
-	printf("Cannot find the running SBE1V1K chainloader FIT in RAM\n");
 	return -ENOENT;
+}
+
+static int recovery_read_installed_chainloader_fit(void **fitp,
+						   size_t *fit_sizep)
+{
+	const struct recovery_sbe1v1k_layout_desc *layout =
+		recovery_sbe1v1k_layout_desc(active_sbe1v1k_layout);
+	struct disk_partition part;
+	struct blk_desc *desc;
+	unsigned long long capacity;
+	unsigned long max = recovery_uboot_limit();
+	lbaint_t blocks;
+	ulong blksz;
+	size_t fit_size;
+	size_t read_size;
+	u8 *header = NULL;
+	u8 *fit = NULL;
+	int ret;
+
+	if (!layout)
+		return -ENOENT;
+
+	ret = recovery_get_mmc_part(layout->uboot_part, &desc, &part);
+	if (ret)
+		return ret;
+
+	blksz = part.blksz ?: desc->blksz;
+	if (!blksz || !part.size)
+		return -EINVAL;
+	capacity = (unsigned long long)part.size * blksz;
+
+	header = memalign(ARCH_DMA_MINALIGN, blksz);
+	if (!header)
+		return -ENOMEM;
+	if (blk_dread(desc, part.start, 1, header) != 1) {
+		printf("Failed to read chainloader FIT header from '%s'\n",
+		       layout->uboot_part);
+		ret = -EIO;
+		goto out;
+	}
+	if (fdt_check_header(header)) {
+		ret = -ENOEXEC;
+		goto out;
+	}
+
+	fit_size = fit_get_size(header);
+	if (!fit_size || fit_size > max || fit_size > capacity) {
+		printf("Installed chainloader FIT size %lu is invalid for '%s'\n",
+		       (ulong)fit_size, layout->uboot_part);
+		ret = -EFBIG;
+		goto out;
+	}
+
+	blocks = (fit_size + blksz - 1) / blksz;
+	read_size = blocks * blksz;
+	fit = memalign(ARCH_DMA_MINALIGN, read_size);
+	if (!fit) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	if (blk_dread(desc, part.start, blocks, fit) != blocks) {
+		printf("Failed to read chainloader FIT from '%s'\n",
+		       layout->uboot_part);
+		ret = -EIO;
+		goto out;
+	}
+	if (!recovery_is_sbe1v1k_chainloader_fit(fit, fit_size)) {
+		printf("Installed image in '%s' is not an SBE1V1K chainloader FIT\n",
+		       layout->uboot_part);
+		ret = -ENOEXEC;
+		goto out;
+	}
+
+	*fitp = fit;
+	*fit_sizep = fit_size;
+	fit = NULL;
+	ret = 0;
+	printf("Preserved installed SBE1V1K chainloader FIT from '%s' (%lu bytes)\n",
+	       layout->uboot_part, (ulong)fit_size);
+
+out:
+	free(fit);
+	free(header);
+	return ret;
+}
+
+static int recovery_preserve_chainloader_fit(void **fitp, size_t *fit_sizep)
+{
+	int ret;
+
+	ret = recovery_copy_running_chainloader_fit(fitp, fit_sizep);
+	if (ret != -ENOENT)
+		return ret;
+
+	printf("Running chainloader FIT is not available at 0x%08lx or 0x%08lx; reading the current eMMC partition\n",
+	       RECOVERY_SBE1V1K_FIT_PERSISTENT_ADDR,
+	       RECOVERY_SBE1V1K_FIT_TFTP_ADDR);
+	ret = recovery_read_installed_chainloader_fit(fitp, fit_sizep);
+	if (ret)
+		printf("Cannot preserve the current SBE1V1K chainloader FIT: %d\n",
+		       ret);
+
+	return ret;
 }
 
 static int recovery_load_appsblenv(u8 **bufp, size_t *env_bytesp,
@@ -3399,7 +3514,7 @@ static int recovery_repartition_factory(
 {
 	const struct recovery_sbe1v1k_layout_desc *layout =
 		recovery_sbe1v1k_layout_desc(layout_id);
-	const void *chainloader_fit;
+	void *chainloader_fit;
 	size_t chainloader_size;
 	char *repartition_gpt;
 	u32 erase_progress_base;
@@ -3426,14 +3541,13 @@ static int recovery_repartition_factory(
 	if (ret)
 		return ret;
 
-	ret = recovery_find_running_chainloader_fit(&chainloader_fit,
-						    &chainloader_size);
+	ret = recovery_preserve_chainloader_fit(&chainloader_fit, &chainloader_size);
 	if (ret)
 		return ret;
 
 	ret = recovery_check_appsblenv();
 	if (ret)
-		return ret;
+		goto out;
 
 	printf("Factory anchors verified. Writing SBE1V1K '%s' GPT layout...\n",
 	       layout->name);
@@ -3449,12 +3563,12 @@ static int recovery_repartition_factory(
 
 	ret = recovery_build_sbe1v1k_gpt(layout, &repartition_gpt);
 	if (ret)
-		return ret;
+		goto out;
 
 	ret = env_set("sbe1v1k_repartition_gpt", repartition_gpt);
 	free(repartition_gpt);
 	if (ret)
-		return ret;
+		goto out;
 	prog_write_done = 1;
 	prog_done = prog_erase_done + prog_write_done;
 	recovery_service_runtime(status_leds);
@@ -3462,14 +3576,14 @@ static int recovery_repartition_factory(
 	ret = run_commandf("mmc dev %s", recovery_mmcdev());
 	if (ret) {
 		env_set("sbe1v1k_repartition_gpt", NULL);
-		return ret;
+		goto out;
 	}
 
 	ret = run_commandf("gpt write mmc %s ${sbe1v1k_repartition_gpt}",
 			   recovery_mmcdev());
 	env_set("sbe1v1k_repartition_gpt", NULL);
 	if (ret)
-		return ret;
+		goto out;
 	prog_write_done = 2;
 	prog_done = prog_erase_done + prog_write_done;
 	recovery_service_runtime(status_leds);
@@ -3478,7 +3592,7 @@ static int recovery_repartition_factory(
 	if (ret) {
 		printf("SBE1V1K '%s' GPT verification failed after write: %d\n",
 		       layout->name, ret);
-		return ret;
+		goto out;
 	}
 	prog_write_done = 2;
 	prog_done = prog_erase_done + prog_write_done;
@@ -3486,28 +3600,28 @@ static int recovery_repartition_factory(
 
 	prog_phase = 1;
 	ret = recovery_mmc_erase_part(layout->uboot_part,
-				      status_leds, erase_progress_base);
+					      status_leds, erase_progress_base);
 	if (ret)
-		return ret;
+		goto out;
 	prog_phase = 2;
 
-	printf("Writing running chainloader FIT to '%s'...\n",
+	printf("Writing preserved chainloader FIT to '%s'...\n",
 	       layout->uboot_part);
 	ret = recovery_mmc_write_part(layout->uboot_part,
-				      status_leds, chainloader_fit,
-				      chainloader_size, 2);
+					      status_leds, chainloader_fit,
+					      chainloader_size, 2);
 	if (ret)
-		return ret;
+		goto out;
 
 	printf("Updating factory U-Boot environment in APPSBLENV...\n");
 	ret = recovery_write_appsblenv(status_leds, 2 + chainloader_size,
-				       layout);
+					       layout);
 	if (ret)
-		return ret;
+		goto out;
 
 	ret = recovery_apply_sbe1v1k_layout(layout);
 	if (ret)
-		return ret;
+		goto out;
 
 	prog_write_done = prog_write_total;
 	prog_done = prog_erase_done + prog_write_done;
@@ -3515,7 +3629,10 @@ static int recovery_repartition_factory(
 
 	printf("SBE1V1K '%s' layout written, chainloader installed, APPSBLENV updated. Upload firmware before reboot.\n",
 	       layout->name);
-	return 0;
+
+out:
+	free(chainloader_fit);
+	return ret;
 }
 
 static int recovery_flash_mmc_firmware(struct recovery_status_led_ctrl *status_leds)

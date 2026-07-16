@@ -127,8 +127,10 @@ The recovery action:
 - rewrites only the area starting at LBA `0x1b022`;
 - keeps all existing partitions before LBA `0x1b022` untouched;
 - creates the selected tail layout;
+- preserves the current FIT from the persistent `0x44000000` or TFTP
+  `0x80000000` address, falling back to the active eMMC chainloader partition;
 - fully erases the profile-specific chainloader target, then writes the
-  currently running FIT from `0x80000000` into it;
+  preserved FIT into it;
 - updates `0:APPSBLENV` with `fw_setenv`-equivalent variable changes and
   verifies them by reading the partition back;
 - keeps the HTTP server running so firmware can be uploaded next.
