@@ -894,6 +894,7 @@ static int rtl8261be_config(struct phy_device *phydev)
 	ret = phy_write(phydev, MDIO_MMD_VEND1, RTL8261BE_EXT_RESET, 1);
 	if (ret)
 		return ret;
+	mdelay(30);
 	ret = phy_write(phydev, MDIO_MMD_VEND1, RTL8261BE_EXT_RESET, 0);
 	if (ret)
 		return ret;

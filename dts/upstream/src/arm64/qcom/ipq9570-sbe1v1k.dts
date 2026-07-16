@@ -507,12 +507,12 @@
 &mdio {
 	status = "okay";
 
-	rtl8261be_0: ethernet-phy@5 {
+	rtl8261be_0: ethernet-phy@0 {
 		compatible = "ethernet-phy-ieee802.3-c45";
 		reg = <0>;
 		reset-gpios = <&tlmm 41 GPIO_ACTIVE_LOW>;
-		reset-assert-us = <40000>;
-		reset-deassert-us = <150000>;
+		reset-assert-us = <200000>;
+		reset-deassert-us = <200000>;
 	};
 
 	ethernet-phy-package@16 {

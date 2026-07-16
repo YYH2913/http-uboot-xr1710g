@@ -44,34 +44,85 @@
 #define QTI_8081_PHY_MMD3_AZ_TRAINING_CTRL       0x8008
 #define QTI_8081_PHY_MMD3_AZ_TRAINING_VAL        0x1c32
 
+#define QTI_8081_PHY_SERDES_ADDR_OFFSET		1
+#define QTI_8081_PHY_SERDES_MMD1_FIFO_CTRL	0x9072
+#define QTI_8081_PHY_FIFO_RSTN			BIT(11)
+
 static int qti_8081_config(struct phy_device *phydev)
 {
-	u16 phy_data;
+	int adv_changed, ret;
 
 	/* Enable vga when init napa to fix 8023az issue */
-	phy_data = phy_read_mmd(phydev, QTI_8081_PHY_MMD3_NUM,
-				QTI_8081_PHY_MMD3_ADDR_CLD_CTRL7);
-	phy_data &= (~QTI_8081_PHY_8023AZ_AFE_CTRL_MASK);
-	phy_data |= QTI_8081_PHY_8023AZ_AFE_EN;
-	phy_write_mmd(phydev, QTI_8081_PHY_MMD3_NUM,
-		      QTI_8081_PHY_MMD3_ADDR_CLD_CTRL7, phy_data);
+	ret = phy_modify_mmd(phydev, QTI_8081_PHY_MMD3_NUM,
+			     QTI_8081_PHY_MMD3_ADDR_CLD_CTRL7,
+			     QTI_8081_PHY_8023AZ_AFE_CTRL_MASK,
+			     QTI_8081_PHY_8023AZ_AFE_EN);
+	if (ret)
+		return ret;
 
 	/* Special configuration for AZ under 1G speed mode */
-	phy_write_mmd(phydev, QTI_8081_PHY_MMD3_NUM,
-		      QTI_8081_PHY_MMD3_AZ_TRAINING_CTRL,
-		      QTI_8081_PHY_MMD3_AZ_TRAINING_VAL);
-	return 0;
+	ret = phy_write_mmd(phydev, QTI_8081_PHY_MMD3_NUM,
+			    QTI_8081_PHY_MMD3_AZ_TRAINING_CTRL,
+			    QTI_8081_PHY_MMD3_AZ_TRAINING_VAL);
+	if (ret)
+		return ret;
+
+	adv_changed = phy_modify_mmd_changed(phydev, MDIO_MMD_AN,
+					     MDIO_AN_10GBT_CTRL,
+					     MDIO_AN_10GBT_CTRL_ADV2_5G,
+					     (phydev->advertising &
+					      SUPPORTED_2500baseX_Full) ?
+					     MDIO_AN_10GBT_CTRL_ADV2_5G : 0);
+	if (adv_changed < 0)
+		return adv_changed;
+
+	ret = genphy_config_aneg(phydev);
+	if (ret < 0 || !adv_changed || phydev->autoneg != AUTONEG_ENABLE)
+		return ret;
+
+	return genphy_restart_aneg(phydev);
+}
+
+static int qti_8081_update_fifo(struct phy_device *phydev)
+{
+	struct mii_dev *bus = phydev->bus;
+	int addr = phydev->addr + QTI_8081_PHY_SERDES_ADDR_OFFSET;
+	int old, val;
+
+	if (!bus || !bus->read || !bus->write || addr < 0 || addr >= PHY_MAX_ADDR)
+		return -EINVAL;
+
+	old = bus->read(bus, addr, MDIO_MMD_PMAPMD,
+			QTI_8081_PHY_SERDES_MMD1_FIFO_CTRL);
+	if (old < 0)
+		return old;
+
+	if (phydev->link)
+		val = old | QTI_8081_PHY_FIFO_RSTN;
+	else
+		val = old & ~QTI_8081_PHY_FIFO_RSTN;
+	if (val == old)
+		return 0;
+
+	return bus->write(bus, addr, MDIO_MMD_PMAPMD,
+			  QTI_8081_PHY_SERDES_MMD1_FIFO_CTRL, val);
 }
 
 static int qti_8081_startup(struct phy_device *phydev)
 {
-	u16 phy_data;
+	int phy_data, ret;
 
 	phy_data = phy_read(phydev, MDIO_DEVAD_NONE, QTI_8081_PHY_SPEC_STATUS);
+	if (phy_data < 0)
+		return phy_data;
 	if (phy_data & QTI_8081_STATUS_LINK_PASS)
 		phydev->link = 1;
 	else
 		phydev->link = 0;
+
+	ret = qti_8081_update_fifo(phydev);
+	if (ret)
+		return ret;
 
 	if (phy_data & QTI_8081_STATUS_FULL_DUPLEX)
 		phydev->duplex = DUPLEX_FULL;

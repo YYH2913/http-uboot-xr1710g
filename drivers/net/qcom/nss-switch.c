@@ -5754,6 +5754,10 @@ static int ipq_eth_refresh_link(struct ipq_eth_dev *priv, bool quiet)
 				/* Start up the PHY */
 				ret = phy_startup(phydev);
 				if (ret < 0) {
+					if (!quiet || ipq_edma_debug_trace())
+						printf("PHY%u addr 0x%x (%s): status read failed: %d\n",
+						       port->id, port->phyaddr,
+						       ipq_eth_phy_type_name(port->phy_id), ret);
 					continue;
 				} else {
 					if (phydev->link) {
@@ -6425,29 +6429,34 @@ static int ipq_eth_bind(struct udevice *dev)
 	return 0;
 }
 
-static void ipq_eth_phy_hw_reset(struct port_info *port)
+static int ipq_eth_phy_hw_reset(struct port_info *port)
 {
 	struct gpio_desc *gpio = &port->rst_gpio;
 	u32 assert = port->reset_assert_us;
 	u32 deassert = port->reset_deassert_us;
+	int ret;
 
 	if (!gpio->dev)
-		return;
+		return 0;
 
 	if (!assert)
 		assert = 20000;
 	if (!deassert)
 		deassert = 1000;
 
-	if (dm_gpio_set_value(gpio, 1))
-		return;
+	ret = dm_gpio_set_value(gpio, 1);
+	if (ret)
+		return ret;
 
 	udelay(assert);
 
-	if (dm_gpio_set_value(gpio, 0))
-		return;
+	ret = dm_gpio_set_value(gpio, 0);
+	if (ret)
+		return ret;
 
 	udelay(deassert);
+
+	return 0;
 }
 
 #ifdef CONFIG_PHY_QCA_8X8X
@@ -6960,14 +6969,22 @@ static int ipq_eth_probe(struct udevice *dev)
 		if (port->phyaddr != 0xFF) {
 			if (!port->bus) {
 				ret = ipq_eth_get_mdio_device(port->node, &busdev);
-				if (ret)
+				if (ret) {
+					printf("PHY%u addr 0x%x (%s): MDIO bus unavailable: %d\n",
+					       port->id, port->phyaddr,
+					       ipq_eth_phy_type_name(port->phy_id), ret);
 					continue;
+				}
 
 				port->bus = miiphy_get_dev_by_name(busdev->name);
 			}
 
-			if (!port->bus)
+			if (!port->bus) {
+				printf("PHY%u addr 0x%x (%s): MDIO bus %s is not registered\n",
+				       port->id, port->phyaddr,
+				       ipq_eth_phy_type_name(port->phy_id), busdev->name);
 				continue;
+			}
 		}
 		/*
 		 * Create a dummy bus for the SFP module that is not connected via I2C
@@ -6987,8 +7004,15 @@ static int ipq_eth_probe(struct udevice *dev)
 				"%s", "SFP-DUMMY");
 		}
 
-		if (port->rst_gpio.dev)
-			ipq_eth_phy_hw_reset(port);
+		if (port->rst_gpio.dev) {
+			ret = ipq_eth_phy_hw_reset(port);
+			if (ret) {
+				printf("PHY%u addr 0x%x (%s): hardware reset failed: %d\n",
+				       port->id, port->phyaddr,
+				       ipq_eth_phy_type_name(port->phy_id), ret);
+				continue;
+			}
+		}
 
 #ifdef CONFIG_PHY_QCA_8337
 		if (port->phy_id == QCA8337_SWITCH_TYPE) {
@@ -7029,8 +7053,12 @@ static int ipq_eth_probe(struct udevice *dev)
 			port->phydev = phy_connect(port->bus, port->phyaddr, dev, port->interface);
 		}
 
-		if (IS_ERR_OR_NULL(port->phydev))
+		if (IS_ERR_OR_NULL(port->phydev)) {
+			printf("PHY%u addr 0x%x (%s): connection failed\n",
+			       port->id, port->phyaddr,
+			       ipq_eth_phy_type_name(port->phy_id));
 			continue;
+		}
 
 		if (ofnode_valid(port->node))
 			port->phydev->node = port->node;
@@ -7096,8 +7124,12 @@ static int ipq_eth_probe(struct udevice *dev)
 			       port->uniphy_type);
 
 		ret = phy_config(port->phydev);
-		if (ret < 0)
+		if (ret < 0) {
+			printf("PHY%u addr 0x%x (%s): configuration failed: %d\n",
+			       port->id, port->phyaddr,
+			       ipq_eth_phy_type_name(port->phy_id), ret);
 			continue;
+		}
 
 		port->isconfigured = true;
 
