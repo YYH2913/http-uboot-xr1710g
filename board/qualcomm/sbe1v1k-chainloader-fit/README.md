@@ -108,20 +108,27 @@ Open the recovery page at:
 http://192.168.255.1/
 ```
 
-Use `Repartition factory eMMC` and enter:
+Choose a partition profile, then enter:
 
 ```text
 SBE1V1K_REPARTITION
 ```
+
+The layout selector provides two profiles:
+
+| Profile | Kernel | Root | Data | Chainloader |
+| --- | --- | --- | --- | --- |
+| `mainline` | `0:HLOS`, 7 MiB | `rootfs`, 122 MiB | `rootfs_data`, 512 MiB | `rsvd_2`, first 4 MiB used |
+| `large` | `kernel`, 32 MiB | `rootfs`, 1 GiB | `rootfs_data`, remaining space | `chainloader`, 4 MiB |
 
 The recovery action:
 
 - verifies key boot-chain anchors before the chainloader area;
 - rewrites only the area starting at LBA `0x1b022`;
 - keeps all existing partitions before LBA `0x1b022` untouched;
-- creates `chainloader`, `kernel`, `rootfs`, and `rootfs_data`;
-- fully erases `chainloader`, then writes the currently running FIT from
-  `0x80000000` into it;
+- creates the selected tail layout;
+- fully erases the profile-specific chainloader target, then writes the
+  currently running FIT from `0x80000000` into it;
 - updates `0:APPSBLENV` with `fw_setenv`-equivalent variable changes and
   verifies them by reading the partition back;
 - keeps the HTTP server running so firmware can be uploaded next.
@@ -132,9 +139,10 @@ not format, create, resize, or write UBI volumes on this board.
 Every recovery image update is intentionally destructive. The web client first
 posts the decimal image size to `/action/prepare/firmware` or
 `/action/prepare/uboot`. The recovery main loop then fully erases `kernel`,
-`rootfs`, and `rootfs_data` for firmware, or `chainloader` for a chainloader
-update. Erase work runs outside the lwIP POST callback so status requests and
-TCP maintenance continue while the operation is in progress.
+the selected kernel, rootfs, and rootfs_data partitions for firmware, or the
+selected chainloader target for a chainloader update. Erase work runs outside
+the lwIP POST callback so status requests and TCP maintenance continue while
+the operation is in progress.
 
 After `/status` reports `prepared`, the client posts the exact-size image to
 `/upload/firmware` or `/upload/uboot`. A direct upload without a matching
@@ -145,12 +153,15 @@ the target unbootable.
 Recovery uses exact eMMC erase/TRIM when the device and partition alignment
 allow it. Otherwise, it zero-fills every logical block in the partition so an
 erase-group rounding operation cannot overwrite an adjacent GPT partition.
-The firmware stream uses the SBE1V1K raw recovery-image layout:
-`recovery_kernel_pad` bytes (32 MiB by default) go to `kernel`, and all
-remaining bytes go to `rootfs`. The default upload cap is 1 GiB. This design
-keeps the existing GPT and boot command unchanged; A/B was not selected because
-the required update policy is erase-first and does not require rollback or slot
-selection.
+Raw recovery images use the selected profile's `recovery_kernel_pad`: 7 MiB for
+`mainline` and 32 MiB for `large`. OpenWrt sysupgrade tar images are parsed as
+they arrive; only the `kernel` and `root` members are streamed to their target
+partitions, so the complete tar is never staged in RAM. The default upload cap
+is 1 GiB, additionally limited by the selected kernel and rootfs capacities.
+
+Selecting `mainline` from an existing `large` installation recreates the
+factory-compatible partition entries, but cannot restore old data that the
+large rootfs/rootfs_data partitions previously overwrote.
 
 ## HTTP Partition Backup
 
@@ -165,22 +176,26 @@ streams and destructive upload or repartition requests are mutually exclusive.
 Raw factory partitions can contain credentials, calibration data, and
 device-specific keys; store the downloaded files securely.
 
-The installed stock U-Boot environment is equivalent to:
+The installed stock U-Boot environment is profile-specific. The relevant
+values are:
 
-```sh
-bootargs='console=ttyMSM0,115200n8 rootwait root=PARTLABEL=rootfs'
-boot_chainloader='mmc dev 0 0; mmc read 0x44000000 0x0001b022 0x2000; bootm 0x44000000'
-do_boot='run boot_chainloader'
-do_nothing='true'
-bootcmd='echo "Hit ctrl+c for shell..."; if sleep 3; then setenv bootargs console=ttyMSM0,115200n8 rootwait root=PARTLABEL=rootfs; run do_boot; else run do_nothing; fi;'
-```
+| Profile | `bootargs` root | Chainloader read |
+| --- | --- | --- |
+| `mainline` | `/dev/mmcblk0p27` | LBA `0x4f6022`, `0x2000` sectors |
+| `large` | `PARTLABEL=rootfs` | LBA `0x1b022`, `0x2000` sectors |
+
+Both profiles set `do_boot=run boot_chainloader`, `do_nothing=true`, and a
+three-second interruptible `bootcmd`. The second-stage U-Boot also detects the
+current GPT before every boot: it loads `0:HLOS` for `mainline`, or `kernel` for
+`large`. HTTP recovery repeats the same detection before selecting firmware and
+self-update targets.
 
 `bootcmd` sets `bootargs` again on every boot because the vendor U-Boot resets
 it during startup. Other factory U-Boot environment variables are preserved.
 The Ethernet MAC fallback also reads `ethaddr` from `0:APPSBLENV` when the
 runtime environment does not provide one.
 
-## Target Layout
+## Large Target Layout
 
 Sector size is 512 bytes.
 
@@ -198,37 +213,46 @@ standard factory images it follows `0:HLOS_1`; on QSDK variants without
 `0:HLOS_1`, it follows `0:HLOS`. Scripts and recovery code use labels and fixed
 LBAs, not the numeric index.
 
+## Mainline Target Layout
+
+The `mainline` profile recreates the original tail boundaries, keeps a valid
+secondary GPT, and uses the otherwise empty `rsvd_2` partition for the
+chainloader. Important targets are:
+
+| Start | Sectors | Size | Name | Purpose |
+| ---: | ---: | ---: | --- | --- |
+| 81954 (`0x14022`) | 14336 (`0x3800`) | 7 MiB | `0:HLOS` | OpenWrt kernel FIT |
+| 110626 (`0x1b022`) | 249856 | 122 MiB | `rootfs` | OpenWrt root image |
+| 610338 (`0x95022`) | 1048576 | 512 MiB | `rootfs_data` | persistent data |
+| 5201954 (`0x4f6022`) | 65536 | 32 MiB | `rsvd_2` | raw chainloader FIT; first 4 MiB loaded |
+
+`0:HLOS_1`, `rootfs_1`, and `rootfs_data_1` remain present for partition-number
+compatibility. If the source GPT omitted `0:HLOS_1`, migration creates the
+missing entry so mainline's `/dev/mmcblk0p27` root argument stays valid.
+
 ## Recovery Targets
 
-The chainloader default environment writes:
+Recovery selects these targets from the detected GPT:
 
-```text
-uboot:        0#chainloader
-firmware FIT: 0#kernel + 0#rootfs
-root data:    0#rootfs_data
-```
+| Profile | Chainloader | Firmware | Root data |
+| --- | --- | --- | --- |
+| `mainline` | `0#rsvd_2` | `0#0:HLOS` + `0#rootfs` | `0#rootfs_data` |
+| `large` | `0#chainloader` | `0#kernel` + `0#rootfs` | `0#rootfs_data` |
 
-OpenWrt/QSDK boots from the second-stage chainloader via `kernel` and
-`root=PARTLABEL=rootfs`. It does not depend on `0:HLOS`.
-If loading or booting the `kernel` partition fails and `bootm` returns to
-U-Boot, the second-stage chainloader starts `http_recovery` automatically.
+If loading or booting the selected kernel partition fails and `bootm` returns
+to U-Boot, the second-stage chainloader starts `http_recovery` automatically.
 
 ## Offline eMMC Recovery
 
 If the installed chainloader hangs before the second-stage U-Boot banner and
-the stock U-Boot shell cannot be reached, rewrite only partition 27 on the eMMC
-user area. Do not rewrite the full device and do not use the eMMC boot0/boot1
-hardware partitions.
+the stock U-Boot shell cannot be reached, rewrite only the profile-specific
+chainloader target in the eMMC user area. Do not rewrite the full device and do
+not use the eMMC boot0/boot1 hardware partitions.
 
-Expected chainloader partition:
-
-```text
-partition: chainloader
-start LBA: 110626 (0x1b022)
-sectors:   8192   (0x2000)
-offset:    0x3604400
-size:      4 MiB
-```
+| Profile | Partition label | Start LBA | Byte offset | Written size |
+| --- | --- | ---: | ---: | ---: |
+| `mainline` | `rsvd_2` | 5201954 (`0x4f6022`) | `0x9ec04400` | 4 MiB |
+| `large` | `chainloader` | 110626 (`0x1b022`) | `0x3604400` | 4 MiB |
 
 After attaching the eMMC to a Linux host, first confirm the device and GPT:
 
@@ -236,13 +260,12 @@ After attaching the eMMC to a Linux host, first confirm the device and GPT:
 sudo sgdisk -p /dev/sdX
 ```
 
-The GPT should show partition 27 named `chainloader` at start sector `110626`.
-If the host creates a partition node, write the padded 4 MiB chainloader image
-to that partition:
+Confirm the selected label and start LBA before writing. If the host creates a
+partition node, write the padded 4 MiB chainloader image to that node:
 
 ```sh
 sudo dd if=sbe1v1k-chainloader/sbe1v1k-chainloader-partition.img \
-	of=/dev/sdX27 bs=4M conv=fsync
+	of=/dev/sdXN bs=4M conv=fsync
 ```
 
 If a partition node is not available, write the same image at the fixed byte
@@ -250,11 +273,11 @@ offset on the whole eMMC user device:
 
 ```sh
 sudo dd if=sbe1v1k-chainloader/sbe1v1k-chainloader-partition.img \
-	of=/dev/sdX bs=512 seek=110626 conv=notrunc,fsync
+	of=/dev/sdX bs=512 seek=<profile-start-LBA> conv=notrunc,fsync
 ```
 
-For `/dev/mmcblkN`, the partition node form is `/dev/mmcblkNp27`. Replace
-`/dev/sdX` with the actual eMMC user-area device.
+For `/dev/mmcblkN`, partition nodes use the `/dev/mmcblkNpM` form. Replace all
+device and partition placeholders with the values confirmed from the live GPT.
 
 If a full-device rewrite is unavoidable, first make a raw backup of the eMMC
 user area and, when exposed by the reader, both eMMC boot areas:
@@ -291,7 +314,7 @@ unit's `0:ART`, `0:APPSBLENV`, or `0:LICENSE` as a generic replacement.
 
 ```sh
 make sbe1v1k_chainloader_defconfig
-make CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)
+make CROSS_COMPILE=aarch64-linux-gnu- -j8
 board/qualcomm/sbe1v1k-chainloader-fit/build-chainloader-fit.sh \
 	--payload u-boot.bin \
 	--outdir sbe1v1k-chainloader

@@ -84,7 +84,15 @@ slot 1: 0:HLOS_1, rootfs_1, rootfs_data_1
 Do not install the chainloader into `0:HLOS` or `0:HLOS_1`. Those 7 MiB
 partitions are part of the Askey dual-image verification and backup flow.
 
-## Chainloader Migration Layout
+The captured image shows `rsvd_2` and `rsvd_3` completely filled with the eMMC
+erase value (`0xff`). Both factory rootfs images were also inspected: neither
+accesses those two partition labels. In contrast, `rsvd_1` is checked as an
+Askey-signed repair payload during preinit and must remain available for that
+purpose. The `mainline` recovery profile therefore stores the 4 MiB chainloader
+image at the start of `rsvd_2` (LBA `5201954`, `0x4f6022`) without using either
+HLOS slot.
+
+## Large Chainloader Migration Layout
 
 The table below is the layout produced from the standard factory GPT above.
 The recovery code does not require every source GPT to have the same tail
