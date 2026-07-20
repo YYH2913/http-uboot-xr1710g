@@ -31,6 +31,8 @@ DECLARE_GLOBAL_DATA_PTR;
 
 #define REG_DELAY			1
 #define RESET_DELAY			10
+#define USXGMII_RESET_DELAY		100
+#define USXGMII_PLL_DELAY		100
 #define NSS_PORT_CLK_DATA_UNIPHY_MASK	0xff
 #define NSS_PORT_CLK_DATA_PARENT_312_5	BIT(8)
 
@@ -261,6 +263,11 @@ u32 ppe_port_bridge_isolation_mask(unsigned int nos_iports)
 #define QCA8081_STATUS_SPEED_10MBS		0x0000
 #define QCA8081_MMD3_CLD_CTRL7			0x8007
 #define QCA8081_MMD3_AZ_TRAINING_CTRL		0x8008
+#define QCA8081_MMD7_CHIP_TYPE			0x901d
+#define QCA8081_CHIP_TYPE_1G			BIT(0)
+#define QCA8081_SERDES_ADDR_OFFSET		1
+#define QCA8081_SERDES_MMD1_FIFO_CTRL		0x9072
+#define QCA8081_FIFO_RSTN			BIT(11)
 
 #ifdef CONFIG_MDIO_QCOM_I2C
 extern struct mii_dev *qcom_mdio_i2c_alloc(struct udevice *i2c_bus,
@@ -1016,37 +1023,23 @@ static void ppe_uniphy_10g_r_mode_set(struct port_info *port)
 	ppe_uniphy_reset(port, false, false);
 }
 
-static void ppe_uniphy_usxgmii_mode_set(struct port_info *port)
+static int ppe_uniphy_usxgmii_mode_set(struct port_info *port)
 {
 	u32 index = port->uniphy_id;
 	phys_addr_t base = port->uniphy_base;
-	bool clocks_disabled = false;
 	u32 reg_value;
-	int ret;
+	int ret, restore_ret;
 
-	writel(UNIPHY_MISC2_REG_VALUE, base + UNIPHY_MISC2_REG_OFFSET);
-
-	writel(UNIPHY_PLL_RESET_REG_VALUE, base + UNIPHY_PLL_RESET_REG_OFFSET);
-
-	mdelay(REG_DELAY);
-
-	writel(UNIPHY_PLL_RESET_REG_DEFAULT_VALUE,
-	       base + UNIPHY_PLL_RESET_REG_OFFSET);
-
-	ppe_uniphy_calibration(port);
-
+	/* Keep the PCS channel clocks off throughout mode reconfiguration. */
 	ret = ppe_uniphy_port_clocks_set(port, false);
 	if (ret) {
 		printf("UNIPHY%u port%u clock disable failed: %d\n",
 		       port->uniphy_id, port->id, ret);
-	} else {
-		clocks_disabled = true;
+		return ret;
 	}
-
 	ppe_uniphy_reset(port, false, true);
 
-	mdelay(RESET_DELAY);
-
+	writel(UNIPHY_MISC2_REG_VALUE, base + UNIPHY_MISC2_REG_OFFSET);
 	writel(0x1021, base + PPE_UNIPHY_MODE_CONTROL);
 
 	if (!ppe_uniphy_port_is_sfp(port)) {
@@ -1056,19 +1049,27 @@ static void ppe_uniphy_usxgmii_mode_set(struct port_info *port)
 	}
 
 	ppe_uniphy_reset(port, true, true);
-	mdelay(RESET_DELAY);
+	mdelay(USXGMII_RESET_DELAY);
 	ppe_uniphy_reset(port, true, false);
-	mdelay(RESET_DELAY);
+	mdelay(USXGMII_RESET_DELAY);
 
-	ppe_uniphy_calibration(port);
+	/* Program the complete analog PLL reset values used by OpenWrt. */
+	writel(UNIPHY_PLL_RESET_REG_VALUE, base + UNIPHY_PLL_RESET_REG_OFFSET);
+	mdelay(USXGMII_PLL_DELAY);
+	writel(UNIPHY_PLL_RESET_REG_DEFAULT_VALUE,
+	       base + UNIPHY_PLL_RESET_REG_OFFSET);
+	mdelay(USXGMII_PLL_DELAY);
 
-	if (clocks_disabled) {
-		ret = ppe_uniphy_port_clocks_set(port, true);
-		if (ret)
-			printf("UNIPHY%u port%u clock restore failed: %d\n",
-			       port->uniphy_id, port->id, ret);
+	ret = ppe_uniphy_calibration(port);
+	if (ret)
+		goto out_restore;
+
+	ret = ppe_uniphy_port_clocks_set(port, true);
+	if (ret) {
+		printf("UNIPHY%u port%u clock restore failed: %d\n",
+		       port->uniphy_id, port->id, ret);
+		goto out_release;
 	}
-
 	if (port->phy_25mhz)
 		ppe_uniphy_refclk_set_25M(port);
 
@@ -1076,7 +1077,11 @@ static void ppe_uniphy_usxgmii_mode_set(struct port_info *port)
 
 	mdelay(RESET_DELAY);
 
-	ppe_uniphy_10g_r_linkup(index);
+	ret = ppe_uniphy_10g_r_linkup(index);
+	if (ret)
+		printf("UNIPHY%u port%u 10GBASE-R link not up before USXG_EN\n",
+		       port->uniphy_id, port->id);
+
 	reg_value = csr1_read(index, VR_XS_PCS_DIG_CTRL1_ADDRESS);
 	reg_value |= USXG_EN;
 	csr1_write(index, VR_XS_PCS_DIG_CTRL1_ADDRESS, reg_value);
@@ -1089,6 +1094,17 @@ static void ppe_uniphy_usxgmii_mode_set(struct port_info *port)
 	reg_value &= ~SS5;
 	reg_value |= SS6 | SS13 | DUPLEX_MODE;
 	csr1_write(index, SR_MII_CTRL_ADDRESS, reg_value);
+
+	return 0;
+
+out_restore:
+	restore_ret = ppe_uniphy_port_clocks_set(port, true);
+	if (restore_ret)
+		printf("UNIPHY%u port%u clock restore after failure failed: %d\n",
+		       port->uniphy_id, port->id, restore_ret);
+out_release:
+	ppe_uniphy_reset(port, false, false);
+	return ret;
 }
 
 static void ppe_uniphy_uqxgmii_mode_set(struct port_info *port)
@@ -1199,7 +1215,7 @@ static void ppe_uniphy_uqxgmii_mode_set(struct port_info *port)
 	csr1_write(index, VR_XS_PCS_EEE_MCTRL0_ADDRESS, reg_value);
 }
 
-void ppe_uniphy_mode_set(struct port_info *port)
+static int ppe_uniphy_mode_set(struct port_info *port)
 {
 	switch (port->uniphy_mode) {
 	case PORT_WRAPPER_PSGMII:
@@ -1216,8 +1232,7 @@ void ppe_uniphy_mode_set(struct port_info *port)
 		ppe_uniphy_sgmii_mode_set(port);
 		break;
 	case PORT_WRAPPER_USXGMII:
-		ppe_uniphy_usxgmii_mode_set(port);
-		break;
+		return ppe_uniphy_usxgmii_mode_set(port);
 	case PORT_WRAPPER_10GBASE_R:
 		ppe_uniphy_10g_r_mode_set(port);
 		break;
@@ -1227,6 +1242,8 @@ void ppe_uniphy_mode_set(struct port_info *port)
 	default:
 		break;
 	}
+
+	return 0;
 }
 
 void ppe_uniphy_usxgmii_autoneg_completed(struct port_info *port)
@@ -5514,7 +5531,9 @@ static int ipq_eth_port_set_up(struct ipq_eth_dev *priv,
 			       port->cur_gmac_type);
 
 		if (port->cur_uniphy_mode != port->uniphy_mode) {
-			ppe_uniphy_mode_set(port);
+			ret = ppe_uniphy_mode_set(port);
+			if (ret)
+				goto fail;
 			port->cur_uniphy_mode = port->uniphy_mode;
 		}
 
@@ -8448,6 +8467,7 @@ static int ipq_eth_debug_qca8081(struct ipq_eth_dev *priv, int argc,
 	struct udevice *mdio_dev;
 	u8 addr;
 	int bmcr, bmsr, id1, id2, spec, cld7, az, eee;
+	int an_ctrl, an_stat, chip_type, fifo;
 
 	if (argc > 3)
 		return CMD_RET_USAGE;
@@ -8479,6 +8499,17 @@ static int ipq_eth_debug_qca8081(struct ipq_eth_dev *priv, int argc,
 					 QCA8081_MMD3_AZ_TRAINING_CTRL);
 	eee = ipq_eth_debug_mdio_read_raw(mdio_dev, bus, addr, MDIO_MMD_AN,
 					  QCA8075_MMD7_EEE_CTRL);
+	an_ctrl = ipq_eth_debug_mdio_read_raw(mdio_dev, bus, addr, MDIO_MMD_AN,
+					      MDIO_AN_10GBT_CTRL);
+	an_stat = ipq_eth_debug_mdio_read_raw(mdio_dev, bus, addr, MDIO_MMD_AN,
+					      MDIO_AN_10GBT_STAT);
+	chip_type = ipq_eth_debug_mdio_read_raw(mdio_dev, bus, addr,
+						MDIO_MMD_AN,
+						QCA8081_MMD7_CHIP_TYPE);
+	fifo = ipq_eth_debug_mdio_read_raw(mdio_dev, bus,
+					   addr + QCA8081_SERDES_ADDR_OFFSET,
+					   MDIO_MMD_PMAPMD,
+					   QCA8081_SERDES_MMD1_FIFO_CTRL);
 
 	if (bmcr < 0 || bmsr < 0 || id1 < 0 || id2 < 0 || spec < 0) {
 		printf(" qca8081 phy=0x%x read failed bmcr=%d bmsr=%d id1=%d id2=%d spec=%d\n",
@@ -8501,6 +8532,27 @@ static int ipq_eth_debug_qca8081(struct ipq_eth_dev *priv, int argc,
 
 	printf(" qca8081 phy=0x%x mmd3.cld7=%04x mmd3.az=%04x mmd7.eee=%04x\n",
 	       addr, cld7 & 0xffff, az & 0xffff, eee & 0xffff);
+
+	if (an_ctrl < 0 || an_stat < 0 || chip_type < 0) {
+		printf(" qca8081 phy=0x%x 2.5G status unavailable ctrl=%d stat=%d chip=%d\n",
+		       addr, an_ctrl, an_stat, chip_type);
+	} else {
+		printf(" qca8081 phy=0x%x mmd7.an2500=%04x lp=%04x chip=%04x adv=%u lp_adv=%u 1g_only=%u\n",
+		       addr, an_ctrl & 0xffff, an_stat & 0xffff,
+		       chip_type & 0xffff,
+		       !!(an_ctrl & MDIO_AN_10GBT_CTRL_ADV2_5G),
+		       !!(an_stat & MDIO_AN_10GBT_STAT_LP2_5G),
+		       !!(chip_type & QCA8081_CHIP_TYPE_1G));
+	}
+
+	if (fifo < 0) {
+		printf(" qca8081 serdes=0x%x mmd1.fifo read failed: %d\n",
+		       addr + QCA8081_SERDES_ADDR_OFFSET, fifo);
+	} else {
+		printf(" qca8081 serdes=0x%x mmd1.fifo=%04x rstn=%u\n",
+		       addr + QCA8081_SERDES_ADDR_OFFSET, fifo & 0xffff,
+		       !!(fifo & QCA8081_FIFO_RSTN));
+	}
 
 	return CMD_RET_SUCCESS;
 }
