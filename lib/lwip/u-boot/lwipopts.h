@@ -147,7 +147,12 @@
 #define TCP_WND                         CONFIG_LWIP_TCP_WND
 #define LWIP_WND_SCALE                  1
 #define TCP_RCV_SCALE                   0x7
+#if defined(CONFIG_HTTPD_RECOVERY)
+/* Keep enough backup data in flight to fill a local Ethernet link. */
+#define TCP_SND_BUF                     (32 * TCP_MSS)
+#else
 #define TCP_SND_BUF                     (2 * TCP_MSS)
+#endif
 #ifdef CONFIG_PROT_TCP_SACK_LWIP
 #define LWIP_TCP_SACK_OUT               1
 #endif
@@ -206,6 +211,9 @@
 #define LWIP_HTTPD_POST_MANUAL_WND              1
 #define LWIP_HTTPD_CUSTOM_FILES                 1
 #define LWIP_HTTPD_DYNAMIC_FILE_READ             1
+#define HTTPD_LIMIT_SENDING_TO_2MSS              0
+/* Leave half of the 32-entry low-memory EDMA TX ring available. */
+#define HTTPD_MAX_WRITE_LEN(pcb)                 ((u16_t)(16 * altcp_mss(pcb)))
 #define LWIP_HTTPD_FILE_EXTENSION                1
 #define LWIP_HTTPD_CGI                          0
 #define LWIP_HTTPD_SSI                          0

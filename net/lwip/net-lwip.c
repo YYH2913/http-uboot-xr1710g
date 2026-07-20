@@ -37,6 +37,8 @@ static int net_restarted;
 int net_restart_wrap;
 static uchar net_pkt_buf[(PKTBUFSRX) * PKTSIZE_ALIGN + PKTALIGN]
 	__aligned(PKTALIGN);
+/* NO_SYS lwIP serializes linkoutput calls and U-Boot drivers copy on send. */
+static uchar net_tx_pkt_buf[PKTSIZE_ALIGN] __aligned(PKTALIGN);
 const u8 net_bcast_ethaddr[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 char *pxelinux_configfile;
 
@@ -126,7 +128,7 @@ static bool net_lwip_dispatch_recovery_dhcp(const uchar *packet, int len)
 static err_t net_lwip_tx(struct netif *netif, struct pbuf *p)
 {
 	struct udevice *udev = netif->state;
-	void *pp = NULL;
+	void *packet = p->payload;
 	u16_t tx_len = p->tot_len;
 	int err;
 
@@ -142,21 +144,14 @@ static err_t net_lwip_tx(struct netif *netif, struct pbuf *p)
 	 * packet whenever the first payload is unaligned or the pbuf is chained.
 	 */
 	if (p->next || ((unsigned long)p->payload % PKTALIGN)) {
-		/*
-		 * Some net drivers have strict alignment requirements and may
-		 * fail or output invalid data if the packet is not aligned.
-		 */
-		pp = memalign(PKTALIGN, tx_len);
-		if (!pp)
+		if (tx_len > sizeof(net_tx_pkt_buf))
+			return ERR_BUF;
+		if (pbuf_copy_partial(p, net_tx_pkt_buf, tx_len, 0) != tx_len)
 			return ERR_ABRT;
-		if (pbuf_copy_partial(p, pp, tx_len, 0) != tx_len) {
-			free(pp);
-			return ERR_ABRT;
-		}
+		packet = net_tx_pkt_buf;
 	}
 
-	err = eth_get_ops(udev)->send(udev, pp ? pp : p->payload, tx_len);
-	free(pp);
+	err = eth_get_ops(udev)->send(udev, packet, tx_len);
 	if (err) {
 		debug("send error %d\n", err);
 		return ERR_ABRT;

@@ -501,6 +501,7 @@ out_free:
 #endif /* CONFIG_PHY_AQUANTIA */
 
 #ifdef CONFIG_ETH_LOW_MEM
+/* Explicit DMA cache maintenance keeps heap-backed rings coherent. */
 #define mem_init()
 #define mem_alloc(size, align)		malloc_cache_aligned(size)
 #else
@@ -5887,10 +5888,6 @@ static int ipq_eth_start(struct udevice *dev)
 	bool allow_no_link = env_get_yesno("eth_allow_no_link") == 1;
 	int linkup, ret;
 
-#ifdef CONFIG_ETH_LOW_MEM
-	dcache_disable();
-#endif
-
 	ipq_edma_rx_log_count = 0;
 	ipq_edma_tx_log_count = 0;
 	ipq_edma_txc_log_count = 0;
@@ -6236,10 +6233,6 @@ static void ipq_eth_stop(struct udevice *dev)
 			phy_shutdown(phydev);
 		priv->port[i]->cur_speed = 0;
 	}
-
-#ifdef CONFIG_ETH_LOW_MEM
-	dcache_enable();
-#endif
 }
 
 static int ipq_eth_write_hwaddr(struct udevice *dev)
