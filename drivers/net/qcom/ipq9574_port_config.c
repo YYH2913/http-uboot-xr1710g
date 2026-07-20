@@ -98,7 +98,7 @@ static struct ipq_eth_port_config ipq9574_port_config[] = {
 			GMAC,
 			GMAC,
 			-1,
-			GMAC
+			XGMAC
 		},
 		{
 			PORT_WRAPPER_SGMII0_RGMII4,

@@ -1059,6 +1059,7 @@ static inline void edma_unified_write_masked(phys_addr_t addr, u32 val, struct e
 #define UNIPHY_MISC_SOURCE_SELECTION_REG_OFFSET	0x21c
 #define UNIPHY_MISC_SRC_PHY_MODE		0xa882
 
+#define UNIPHY_MII_ADPT_RESET			BIT(11)
 #define UNIPHY_DEC_CHANNEL_0_INPUT_OUTPUT_4	0x480
 #define UNIPHY_FORCE_SPEED_25M			BIT(3)
 

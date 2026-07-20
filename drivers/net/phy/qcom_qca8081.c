@@ -219,7 +219,7 @@ static int qti_8081_update_fifo(struct phy_device *phydev)
 
 static int qti_8081_startup(struct phy_device *phydev)
 {
-	int phy_data, ret;
+	int phy_data;
 
 	phy_data = phy_read(phydev, MDIO_DEVAD_NONE, QTI_8081_PHY_SPEC_STATUS);
 	if (phy_data < 0)
@@ -229,10 +229,7 @@ static int qti_8081_startup(struct phy_device *phydev)
 	else
 		phydev->link = 0;
 
-	ret = qti_8081_update_fifo(phydev);
-	if (ret)
-		debug("QCA8081 PHY 0x%x SerDes FIFO update failed: %d\n",
-		      phydev->addr, ret);
+	(void)qti_8081_update_fifo(phydev);
 
 	if (phy_data & QTI_8081_STATUS_FULL_DUPLEX)
 		phydev->duplex = DUPLEX_FULL;
@@ -254,6 +251,13 @@ static int qti_8081_startup(struct phy_device *phydev)
 		break;
 	default:
 		return -EINVAL;
+	}
+
+	if (phydev->link) {
+		if (phydev->speed == SPEED_2500)
+			phydev->interface = PHY_INTERFACE_MODE_2500BASEX;
+		else
+			phydev->interface = PHY_INTERFACE_MODE_SGMII;
 	}
 
 	return 0;

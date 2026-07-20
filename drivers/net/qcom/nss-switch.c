@@ -1397,6 +1397,17 @@ void ppe_uniphy_usxgmii_port_reset(int uniphy_index, int port_id,
 	mdelay(10);
 }
 
+static void ppe_uniphy_sgmii_adapter_reset(struct port_info *port)
+{
+	phys_addr_t reg = port->uniphy_base +
+			  UNIPHY_DEC_CHANNEL_0_INPUT_OUTPUT_4;
+	u32 value = readl(reg);
+
+	writel(value & ~UNIPHY_MII_ADPT_RESET, reg);
+	udelay(1);
+	writel(value | UNIPHY_MII_ADPT_RESET, reg);
+}
+
 /*
  * PPE configuration
  */
@@ -1594,12 +1605,21 @@ void ppe_port_speed_set(phys_addr_t reg_base, struct port_info *port)
 		ppe_uniphy_usxgmii_port_reset(port->uniphy_id, port->id,
 					      port->uniphy_mode);
 		usxgmii = true;
-	case PORT_WRAPPER_SGMII_PLUS:
 		if (port->gmac_type == XGMAC)
 			speed = port->mac_speed;
 		break;
-	case PORT_WRAPPER_QSGMII:
+	case PORT_WRAPPER_SGMII_PLUS:
+		ppe_uniphy_sgmii_adapter_reset(port);
+		if (port->gmac_type == XGMAC)
+			speed = port->mac_speed;
+		break;
 	case PORT_WRAPPER_SGMII0_RGMII4:
+	case PORT_WRAPPER_SGMII1_RGMII4:
+	case PORT_WRAPPER_SGMII4_RGMII4:
+	case PORT_WRAPPER_SGMII_FIBER:
+		ppe_uniphy_sgmii_adapter_reset(port);
+		break;
+	case PORT_WRAPPER_QSGMII:
 	case PORT_WRAPPER_PSGMII:
 		break;
 	case PORT_WRAPPER_EMULATION:
@@ -5490,7 +5510,8 @@ static int ipq_eth_port_set_up(struct ipq_eth_dev *priv,
 		mac_speed = 3;
 		break;
 	case 2500:
-		mac_speed = (port->xgmac) ? 4 : 2;
+		mac_speed = (port->phy_id == QCA8081_PHY_TYPE || port->xgmac) ?
+			    4 : 2;
 		break;
 	case 5000:
 		mac_speed = 5;
@@ -5779,13 +5800,14 @@ static int ipq_eth_refresh_link(struct ipq_eth_dev *priv, bool quiet)
 						       port->id, port->phyaddr,
 						       ipq_eth_phy_type_name(port->phy_id), ret);
 					continue;
-				} else {
-					if (phydev->link) {
-						++linkup;
-						link = phydev->link;
-						duplex = phydev->duplex;
-						speed = phydev->speed;
-					}
+				}
+				if (phydev->link) {
+					++linkup;
+					link = phydev->link;
+					duplex = phydev->duplex;
+					speed = phydev->speed;
+					if (port->phy_id == QCA8081_PHY_TYPE)
+						port->interface = phydev->interface;
 				}
 			} else if (priv->emulation) {
 				/*
@@ -6651,6 +6673,10 @@ static void ipq_eth_apply_interface_override(struct port_info *port, int *rate)
 
 static bool ipq_eth_port_uses_dt_interface(struct port_info *port)
 {
+	/* QCA8081 switches between SGMII and 2500BASE-X after AN. */
+	if (port->phy_id == QCA8081_PHY_TYPE)
+		return false;
+
 	return port->interface == PHY_INTERFACE_MODE_QSGMII ||
 	       port->interface == PHY_INTERFACE_MODE_USXGMII;
 }
