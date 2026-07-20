@@ -5892,8 +5892,13 @@ static void ipq_eth_refresh_link_if_needed(struct ipq_eth_dev *priv,
 
 	if (env_get_yesno("eth_allow_no_link") != 1)
 		return;
-	if (!force && ipq_eth_has_active_link(priv))
-		return;
+
+	/*
+	 * HTTP recovery may start with a link on one port and be moved to
+	 * another port while the server is running.  Do not trust the cached
+	 * active-link bit in that mode; it would prevent the new PHY from ever
+	 * being sampled.  The timer below keeps the MDIO work bounded.
+	 */
 
 	now = get_timer(0);
 	if (!force && ipq_eth_link_refresh_last_ms &&
@@ -7268,7 +7273,7 @@ static int ipq_eth_add_dt_port(struct ipq_eth_dev *priv, ofnode port_node,
 {
 	struct port_info *port;
 	ofnode pcs_node;
-	u32 pcs_uniphy_id, pcs_channel;
+	u32 pcs_uniphy_id, pcs_channel, uniphy_type;
 	u32 port_id, phy_id, uniphy_id;
 	int ret;
 
@@ -7335,10 +7340,23 @@ static int ipq_eth_add_dt_port(struct ipq_eth_dev *priv, ofnode port_node,
 	port->id = port_id;
 
 	port->pcs_channel = pcs_channel;
-	port->uniphy_type = ipq_eth_read_u32_2(port_node, phy_node,
-					       "uniphy_type", -1);
-	if (port->uniphy_type == (u32)-1)
-		port->uniphy_type = ipq_eth_default_uniphy_type(port_id);
+	/*
+	 * The PCS selector is a one-bit field in PORT_MUX_CTRL.  Keep the
+	 * sentinel in a u32 until the fallback is applied; assigning it directly
+	 * to the u8 member turns -1 into 0xff and defeats the port-5 PCS1
+	 * default used by the upstream DTS.
+	 */
+	uniphy_type = ipq_eth_read_u32_2(port_node, phy_node,
+					 "uniphy_type", (u32)-1);
+	if (uniphy_type == (u32)-1)
+		uniphy_type = ipq_eth_default_uniphy_type(port_id);
+	if (uniphy_type > 1) {
+		printf("Invalid PCS selector %u for Ethernet port %u\n",
+		       uniphy_type, port_id);
+		free(port);
+		return -EINVAL;
+	}
+	port->uniphy_type = (u8)uniphy_type;
 	port->max_speed = ipq_eth_read_u32_2(port_node, phy_node,
 					     "max_speed", -1);
 	if (port->max_speed == (u32)-1)
