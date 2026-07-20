@@ -84,6 +84,18 @@ static bool recovery_debug_enabled(void)
 	return env_get_yesno("recovery_debug") == 1;
 }
 
+static void __printf(1, 2) recovery_debug_printf(const char *fmt, ...)
+{
+	va_list ap;
+
+	if (!recovery_debug_enabled())
+		return;
+
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
+	va_end(ap);
+}
+
 static bool recovery_board_is_sbe1v1k(void)
 {
 	return ofnode_device_is_compatible(ofnode_root(), "askey,sbe1v1k");
@@ -683,12 +695,14 @@ static int recovery_status_pwm_init(struct recovery_status_led_ctrl *ctrl)
 	ctrl->use_pwm = true;
 	ctrl->last_pwm_update = 0;
 
-	printf("Recovery status LEDs using hardware PWM:");
-	for (i = 0; i < ctrl->pwm_count; i++)
-		printf(" ch%u/%uns%s", ctrl->pwm_leds[i].channel,
-		       ctrl->pwm_leds[i].period_ns,
-		       ctrl->pwm_leds[i].active_low ? "(L)" : "");
-	printf("\n");
+	if (recovery_debug_enabled()) {
+		printf("Recovery status LEDs using hardware PWM:");
+		for (i = 0; i < ctrl->pwm_count; i++)
+			printf(" ch%u/%uns%s", ctrl->pwm_leds[i].channel,
+			       ctrl->pwm_leds[i].period_ns,
+			       ctrl->pwm_leds[i].active_low ? "(L)" : "");
+		printf("\n");
+	}
 
 	return 0;
 
@@ -1219,13 +1233,17 @@ static int recovery_dhcp_server_init(struct recovery_dhcp_server *srv,
 	udp_bind_netif(srv->pcb, netif);
 	udp_recv(srv->pcb, recovery_dhcp_recv, srv);
 
-	printf("DHCP recovery server: %s/67 -> offer %s mask %s gw %s bcast %s\n",
-	       ip4addr_ntoa_r(&srv->server_ip, server_ip, sizeof(server_ip)),
-	       ip4addr_ntoa_r(&srv->client_ip, client_ip, sizeof(client_ip)),
-	       ip4addr_ntoa_r(&srv->netmask, netmask, sizeof(netmask)),
-	       ip4addr_ntoa_r(&srv->router, router, sizeof(router)),
-	       ip4addr_ntoa_r(&srv->broadcast, broadcast,
-			      sizeof(broadcast)));
+	recovery_debug_printf("DHCP recovery server: %s/67 -> offer %s mask %s gw %s bcast %s\n",
+			      ip4addr_ntoa_r(&srv->server_ip, server_ip,
+					     sizeof(server_ip)),
+			      ip4addr_ntoa_r(&srv->client_ip, client_ip,
+					     sizeof(client_ip)),
+			      ip4addr_ntoa_r(&srv->netmask, netmask,
+					     sizeof(netmask)),
+			      ip4addr_ntoa_r(&srv->router, router,
+					     sizeof(router)),
+			      ip4addr_ntoa_r(&srv->broadcast, broadcast,
+					     sizeof(broadcast)));
 
 	return 0;
 }
@@ -1840,22 +1858,25 @@ static int recovery_extract_firmware(const void *data, size_t size,
 
 	ret = recovery_fit_extract_firmware(data, size, image);
 	if (!ret && image->kernel.data && image->rootfs.data) {
-		printf("Firmware image: bootable FIT=%lu rootfs=%lu\n",
-		       (ulong)image->kernel.size, (ulong)image->rootfs.size);
+		recovery_debug_printf("Firmware image: bootable FIT=%lu rootfs=%lu\n",
+				      (ulong)image->kernel.size,
+				      (ulong)image->rootfs.size);
 		return 0;
 	}
 
 	ret = recovery_tar_extract_firmware(data, size, image);
 	if (!ret && image->kernel.data && image->rootfs.data) {
-		printf("Firmware image: sysupgrade tar kernel=%lu rootfs=%lu\n",
-		       (ulong)image->kernel.size, (ulong)image->rootfs.size);
+		recovery_debug_printf("Firmware image: sysupgrade tar kernel=%lu rootfs=%lu\n",
+				      (ulong)image->kernel.size,
+				      (ulong)image->rootfs.size);
 		return 0;
 	}
 
 	ret = recovery_raw_extract_firmware(data, size, image);
 	if (!ret && image->kernel.data && image->rootfs.data) {
-		printf("Firmware image: raw kernel/rootfs split kernel=%lu rootfs=%lu\n",
-		       (ulong)image->kernel.size, (ulong)image->rootfs.size);
+		recovery_debug_printf("Firmware image: raw kernel/rootfs split kernel=%lu rootfs=%lu\n",
+				      (ulong)image->kernel.size,
+				      (ulong)image->rootfs.size);
 		return 0;
 	}
 
@@ -1937,7 +1958,7 @@ recovery_validate_sbe1v1k_kernel_fit(const struct recovery_image_part *kernel)
 		return -ENOEXEC;
 	}
 
-	printf("SBE1V1K boot FIT validation passed\n");
+	recovery_debug_printf("SBE1V1K boot FIT validation passed\n");
 	return 0;
 }
 
@@ -1961,7 +1982,7 @@ recovery_validate_sbe1v1k_rootfs(const struct recovery_image_part *rootfs)
 		return -EINVAL;
 	}
 
-	printf("SBE1V1K SquashFS validation passed\n");
+	recovery_debug_printf("SBE1V1K SquashFS validation passed\n");
 	return 0;
 }
 
@@ -2150,12 +2171,12 @@ static int recovery_mmc_erase_part(const char *spec,
 		(mmc->can_trim || (!(part.start % erase_group) &&
 				   !(part.size % erase_group)));
 
-	printf("Erasing entire eMMC partition '%s' (%llu blocks, %llu bytes)...\n",
-	       spec, (unsigned long long)part.size, capacity);
+	recovery_debug_printf("Erasing entire eMMC partition '%s' (%llu blocks, %llu bytes)...\n",
+			      spec, (unsigned long long)part.size, capacity);
 
 	if (!exact) {
-		printf("eMMC partition '%s' is not erase-group aligned and exact trim is unavailable; zero-filling the complete partition to protect adjacent GPT partitions\n",
-		       spec);
+		recovery_debug_printf("eMMC partition '%s' is not erase-group aligned and exact trim is unavailable; zero-filling the complete partition to protect adjacent GPT partitions\n",
+				      spec);
 		return recovery_mmc_zero_part(spec, status_leds, desc, &part,
 					      progress_base);
 	}
@@ -2368,7 +2389,7 @@ static int recovery_mmc_stream_prepare(enum upload_target target, size_t size,
 	prog_done = prog_erase_done;
 	recovery_stream.active = true;
 	recovery_stream.prepared = true;
-	printf("Destructive eMMC stream prepared after complete target erase\n");
+	recovery_debug_printf("Destructive eMMC stream prepared after complete target erase\n");
 	return 0;
 
 err:
@@ -2934,8 +2955,9 @@ static int recovery_build_sbe1v1k_gpt(
 			goto err;
 	}
 
-	printf("Building SBE1V1K '%s' GPT; preserving %d partitions before LBA %llu\n",
-	       layout->name, preserved, RECOVERY_SBE1V1K_CHAINLOADER_START);
+	recovery_debug_printf("Building SBE1V1K '%s' GPT; preserving %d partitions before LBA %llu\n",
+			      layout->name, preserved,
+			      RECOVERY_SBE1V1K_CHAINLOADER_START);
 	*gptp = gpt;
 	return 0;
 
@@ -3054,7 +3076,7 @@ static int recovery_apply_sbe1v1k_layout(
 		return ret;
 
 	active_sbe1v1k_layout = layout->id;
-	printf("SBE1V1K partition profile: %s\n", layout->name);
+	recovery_debug_printf("SBE1V1K partition profile: %s\n", layout->name);
 	return 0;
 }
 
@@ -3146,8 +3168,8 @@ static int recovery_copy_running_chainloader_fit(void **fitp,
 
 		*fitp = copy;
 		*fit_sizep = fit_size;
-		printf("Preserved running SBE1V1K chainloader FIT from 0x%08lx (%lu bytes)\n",
-		       addr, (ulong)fit_size);
+		recovery_debug_printf("Preserved running SBE1V1K chainloader FIT from 0x%08lx (%lu bytes)\n",
+				      addr, (ulong)fit_size);
 		return 0;
 	}
 
@@ -3229,8 +3251,8 @@ static int recovery_read_installed_chainloader_fit(void **fitp,
 	*fit_sizep = fit_size;
 	fit = NULL;
 	ret = 0;
-	printf("Preserved installed SBE1V1K chainloader FIT from '%s' (%lu bytes)\n",
-	       layout->uboot_part, (ulong)fit_size);
+	recovery_debug_printf("Preserved installed SBE1V1K chainloader FIT from '%s' (%lu bytes)\n",
+			      layout->uboot_part, (ulong)fit_size);
 
 out:
 	free(fit);
@@ -3246,9 +3268,9 @@ static int recovery_preserve_chainloader_fit(void **fitp, size_t *fit_sizep)
 	if (ret != -ENOENT)
 		return ret;
 
-	printf("Running chainloader FIT is not available at 0x%08lx or 0x%08lx; reading the current eMMC partition\n",
-	       RECOVERY_SBE1V1K_FIT_PERSISTENT_ADDR,
-	       RECOVERY_SBE1V1K_FIT_TFTP_ADDR);
+	recovery_debug_printf("Running chainloader FIT is not available at 0x%08lx or 0x%08lx; reading the current eMMC partition\n",
+			      RECOVERY_SBE1V1K_FIT_PERSISTENT_ADDR,
+			      RECOVERY_SBE1V1K_FIT_TFTP_ADDR);
 	ret = recovery_read_installed_chainloader_fit(fitp, fit_sizep);
 	if (ret)
 		printf("Cannot preserve the current SBE1V1K chainloader FIT: %d\n",
@@ -3555,7 +3577,7 @@ static int recovery_write_appsblenv(struct recovery_status_led_ctrl *status_leds
 	if (ret)
 		goto out;
 
-	printf("APPSBLENV update verified\n");
+	recovery_debug_printf("APPSBLENV update verified\n");
 
 	prog_write_done = progress_base + env_bytes;
 	prog_done = prog_erase_done + prog_write_done;
@@ -3607,8 +3629,8 @@ static int recovery_repartition_factory(
 	if (ret)
 		goto out;
 
-	printf("Factory anchors verified. Writing SBE1V1K '%s' GPT layout...\n",
-	       layout->name);
+	recovery_debug_printf("Factory anchors verified. Writing SBE1V1K '%s' GPT layout...\n",
+			      layout->name);
 	prog_phase = 2;
 	prog_erase_done = prog_erase_total;
 	erase_progress_base = prog_erase_total;
@@ -3663,15 +3685,15 @@ static int recovery_repartition_factory(
 		goto out;
 	prog_phase = 2;
 
-	printf("Writing preserved chainloader FIT to '%s'...\n",
-	       layout->uboot_part);
+	recovery_debug_printf("Writing preserved chainloader FIT to '%s'...\n",
+			      layout->uboot_part);
 	ret = recovery_mmc_write_part(layout->uboot_part,
 					      status_leds, chainloader_fit,
 					      chainloader_size, 2);
 	if (ret)
 		goto out;
 
-	printf("Updating factory U-Boot environment in APPSBLENV...\n");
+	recovery_debug_printf("Updating factory U-Boot environment in APPSBLENV...\n");
 	ret = recovery_write_appsblenv(status_leds, 2 + chainloader_size,
 					       layout);
 	if (ret)
@@ -3685,8 +3707,8 @@ static int recovery_repartition_factory(
 	prog_done = prog_erase_done + prog_write_done;
 	recovery_service_runtime(status_leds);
 
-	printf("SBE1V1K '%s' layout written, chainloader installed, APPSBLENV updated. Upload firmware before reboot.\n",
-	       layout->name);
+	recovery_debug_printf("SBE1V1K '%s' layout written, chainloader installed, APPSBLENV updated. Upload firmware before reboot.\n",
+			      layout->name);
 
 out:
 	free(chainloader_fit);
@@ -3748,15 +3770,15 @@ static int recovery_flash_mmc_firmware(struct recovery_status_led_ctrl *status_l
 
 	prog_phase = 2;
 
-	printf("Writing kernel payload to eMMC partition '%s'...\n",
-	       kernel_part);
+	recovery_debug_printf("Writing kernel payload to eMMC partition '%s'...\n",
+			      kernel_part);
 	ret = recovery_mmc_write_part(kernel_part, status_leds,
 				      image.kernel.data, image.kernel.size, 0);
 	if (ret)
 		return ret;
 
-	printf("Writing rootfs payload to eMMC partition '%s'...\n",
-	       rootfs_part);
+	recovery_debug_printf("Writing rootfs payload to eMMC partition '%s'...\n",
+			      rootfs_part);
 	ret = recovery_mmc_write_part(rootfs_part, status_leds,
 				      image.rootfs.data, image.rootfs.size,
 				      image.kernel.size);
@@ -3829,16 +3851,16 @@ static int recovery_flash_mmc_uboot(struct recovery_status_led_ctrl *status_leds
 
 	prog_phase = 2;
 
-	printf("Writing chainloader FIT to eMMC partition '%s'...\n",
-	       uboot_part);
+	recovery_debug_printf("Writing chainloader FIT to eMMC partition '%s'...\n",
+			      uboot_part);
 	ret = recovery_mmc_write_part(uboot_part, status_leds,
 				      recv_base, recv_off, 0);
 	if (ret)
 		return ret;
 
 	if (uboot_alt_part && *uboot_alt_part) {
-		printf("Writing chainloader FIT to alternate eMMC partition '%s'...\n",
-		       uboot_alt_part);
+		recovery_debug_printf("Writing chainloader FIT to alternate eMMC partition '%s'...\n",
+				      uboot_alt_part);
 		ret = recovery_mmc_write_part(uboot_alt_part, status_leds,
 					      recv_base, recv_off, recv_off);
 		if (ret)
@@ -4356,8 +4378,8 @@ static int recovery_prepare_ubi_target(struct recovery_target *target,
 	prog_write_total = image_size;
 	prog_total = prog_erase_total + prog_write_total;
 
-	printf("UBI partition '%s' is invalid, erasing it to recreate layout...\n",
-	       target->ubi_part);
+	recovery_debug_printf("UBI partition '%s' is invalid, erasing it to recreate layout...\n",
+			      target->ubi_part);
 	ret = recovery_erase_mtd_region(target->mtd, 0, target->mtd->size,
 					status_leds);
 	if (ret)
@@ -4510,8 +4532,8 @@ static int recovery_cleanup_ubi_firmware(struct recovery_target *target,
 		prog_erase_volume_base = erase_done;
 		prog_erase_volume_bytes = vol_size;
 
-		printf("Removing UBI volume '%s' before flashing '%s'...\n",
-		       name, target->name);
+		recovery_debug_printf("Removing UBI volume '%s' before flashing '%s'...\n",
+				      name, target->name);
 		ret = recovery_remove_ubi_volume(name);
 		if (ret) {
 			printf("Failed to remove UBI volume '%s': %d\n", name, ret);
@@ -5386,11 +5408,11 @@ static int recovery_open_backup(struct fs_file *file, const char *path)
 	file->pextension = (fs_file_extension *)backup;
 	file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
 	if (backup->mode == RECOVERY_BACKUP_ALL_TAR)
-		printf("httpd: streaming full eMMC backup (%u sources, %llu-byte tar)\n",
-		       source_count, archive_size);
+		recovery_debug_printf("httpd: streaming full eMMC backup (%u sources, %llu-byte tar)\n",
+				      source_count, archive_size);
 	else
-		printf("httpd: streaming backup of %s (%llu bytes)\n",
-		       source.name, source.bytes);
+		recovery_debug_printf("httpd: streaming backup of %s (%llu bytes)\n",
+				      source.name, source.bytes);
 	return 1;
 
 error:
@@ -5973,8 +5995,8 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
 		prog_reboot = 0;
 		post_ok = 1;
 		tname = current_target == TARGET_FIRMWARE ? "firmware" : "uboot";
-		printf("httpd: accepting prepared destructive stream of %u bytes for %s\n",
-		       recv_total, tname);
+		recovery_debug_printf("httpd: accepting prepared destructive stream of %u bytes for %s\n",
+				      recv_total, tname);
 		return ERR_OK;
 	}
 
@@ -6029,11 +6051,11 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
 	tname = current_target == TARGET_FIRMWARE ? "firmware" :
 		current_target == TARGET_UBOOT ? "uboot" : "repartition";
 	if (current_prepare_only)
-		printf("httpd: accepting erase preparation for %s\n", tname);
+		recovery_debug_printf("httpd: accepting erase preparation for %s\n", tname);
 	else
-		printf("httpd: accepting upload of %u bytes for %s to 0x%08lx%s\n",
-		       recv_total, tname, (ulong)recv_base,
-		       current_force_recreate ? " (force recreate)" : "");
+		recovery_debug_printf("httpd: accepting upload of %u bytes for %s to 0x%08lx%s\n",
+				      recv_total, tname, (ulong)recv_base,
+				      current_force_recreate ? " (force recreate)" : "");
 	return ERR_OK;
 }
 
@@ -6112,8 +6134,8 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
 			}
 		}
 
-		printf("httpd: prepare request finished, %u/%u bytes received\n",
-		       recv_off, recv_total);
+		recovery_debug_printf("httpd: prepare request finished, %u/%u bytes received\n",
+				      recv_off, recv_total);
 		if (post_ok) {
 			strlcpy(response_uri, "/ok", response_uri_len);
 			sys_timeout(RECOVERY_PREPARE_START_DELAY_MS,
@@ -6136,7 +6158,8 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
 			prog_reboot = 1;
 		}
 	}
-	printf("httpd: post finished, %u/%u bytes received\n", recv_off, recv_total);
+	recovery_debug_printf("httpd: post finished, %u/%u bytes received\n",
+			      recv_off, recv_total);
     /* Tell httpd which page to return after POST (keep user on main page) */
     if (post_ok && recv_total && (recv_off >= recv_total))
         strlcpy(response_uri, "/ok", response_uri_len);
@@ -6182,7 +6205,7 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		}
 
 		prog_phase = 3;
-		printf("Factory repartition complete.\n");
+		recovery_debug_printf("Factory repartition complete.\n");
 		return 0;
 	}
 
@@ -6216,7 +6239,7 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 
 		prog_phase = 3;
 		prog_reboot = 1;
-		printf("Flashing complete.\n");
+		recovery_debug_printf("Flashing complete.\n");
 		return 0;
 	}
 
@@ -6224,7 +6247,7 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		bool reformatted = false;
 
 		if (current_force_recreate && current_target == TARGET_FIRMWARE)
-			printf("Force recreate requested: removing non-preserved UBI volumes before flashing.\n");
+			recovery_debug_printf("Force recreate requested: removing non-preserved UBI volumes before flashing.\n");
 
 		ret = recovery_prepare_ubi_target(&target, status_leds, recv_off,
 						      &reformatted);
@@ -6249,8 +6272,8 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		}
 
 		if (!target.cur_size) {
-			printf("Creating missing UBI volume '%s' for %u bytes...\n",
-			       target.name, recv_off);
+			recovery_debug_printf("Creating missing UBI volume '%s' for %u bytes...\n",
+					      target.name, recv_off);
 			ret = recovery_create_ubi_target(&target, recv_off);
 			if (ret) {
 				printf("ubi_create_volume failed for '%s': %d\n",
@@ -6259,8 +6282,8 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 				return ret;
 			}
 		} else if (recv_off > target.cur_size) {
-			printf("Resizing UBI volume '%s' from %llu to fit %u bytes...\n",
-			       target.name, target.cur_size, recv_off);
+			recovery_debug_printf("Resizing UBI volume '%s' from %llu to fit %u bytes...\n",
+					      target.name, target.cur_size, recv_off);
 			ret = recovery_resize_ubi_target(&target, recv_off);
 			if (ret) {
 				printf("ubi_resize_volume failed for '%s': %d\n",
@@ -6284,8 +6307,8 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 			return ret;
 		}
 
-			printf("Writing %u bytes to UBI volume '%s' on '%s'...\n",
-			       recv_off, target.name, target.ubi_part);
+			recovery_debug_printf("Writing %u bytes to UBI volume '%s' on '%s'...\n",
+					      recv_off, target.name, target.ubi_part);
 			prog_phase = 2;
 			prog_done = prog_erase_total;
 			prog_write_done = 0;
@@ -6307,7 +6330,7 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		prog_reboot = 1;
 		if (current_target == TARGET_FIRMWARE)
 			xr1710g_sync_factory();
-		printf("Flashing complete.\n");
+		recovery_debug_printf("Flashing complete.\n");
 		return 0;
 	}
 
@@ -6324,8 +6347,9 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		prog_write_total = recv_off;
 		prog_total = prog_erase_total + prog_write_total;
 
-		printf("Erasing entire target '%s' (%llu bytes) and writing %u bytes...\n",
-		       target.name, (unsigned long long)target.limit, recv_off);
+		recovery_debug_printf("Erasing entire target '%s' (%llu bytes) and writing %u bytes...\n",
+				      target.name, (unsigned long long)target.limit,
+				      recv_off);
 		ret = recovery_erase_mtd_region(mtd, ofs, target.limit,
 						status_leds);
 		if (ret) {
@@ -6369,7 +6393,7 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	prog_reboot = 1;
 	if (current_target == TARGET_FIRMWARE)
 		xr1710g_sync_factory();
-	printf("Flashing complete.\n");
+	recovery_debug_printf("Flashing complete.\n");
 	return 0;
 }
 
@@ -6415,7 +6439,7 @@ int run_http_recovery(void)
 	if (recovery_board_is_sbe1v1k() && recovery_backend_is_mmc())
 		recovery_detect_sbe1v1k_layout();
 
-	printf("HTTP recovery: preparing board runtime\n");
+	recovery_debug_printf("HTTP recovery: preparing board runtime\n");
 	recovery_watchdog_poll();
 	rc = recovery_status_led_init(&status_leds);
 	if (!rc) {
@@ -6430,7 +6454,7 @@ int run_http_recovery(void)
 	}
 	recovery_prepare_static_network();
 
-	printf("HTTP recovery: starting Ethernet\n");
+	recovery_debug_printf("HTTP recovery: starting Ethernet\n");
 	recovery_watchdog_poll();
 	rc = net_lwip_eth_start();
 	if (rc < 0) {
@@ -6447,7 +6471,7 @@ int run_http_recovery(void)
 		goto out;
 	}
 
-	printf("HTTP recovery: creating lwIP netif\n");
+	recovery_debug_printf("HTTP recovery: creating lwIP netif\n");
 	netif = net_lwip_new_netif(udev);
 	if (!netif) {
 		rc = -ENODEV;
@@ -6455,17 +6479,17 @@ int run_http_recovery(void)
 	}
 	recovery_watchdog_poll();
 
-	printf("HTTP recovery: starting DHCP helper\n");
+	recovery_debug_printf("HTTP recovery: starting DHCP helper\n");
 	rc = recovery_dhcp_server_init(&dhcp, netif);
 	if (rc)
 		printf("Failed to start recovery DHCP server: %d\n", rc);
 	else
 		net_lwip_set_recovery_dhcp_hook(recovery_dhcp_recv, &dhcp);
 
-	printf("HTTP recovery: starting HTTP server\n");
+	recovery_debug_printf("HTTP recovery: starting HTTP server\n");
 	httpd_init();
-	printf("HTTP recovery server listening on http://%s/\n",
-	       ip4addr_ntoa(netif_ip4_addr(netif)));
+	recovery_debug_printf("HTTP recovery server listening on http://%s/\n",
+			      ip4addr_ntoa(netif_ip4_addr(netif)));
 
 	timeout_ms = env_get_ulong("recovery_timeout", 10, 0) * 1000;
 	start_ms = get_timer(0);
@@ -6475,7 +6499,7 @@ int run_http_recovery(void)
 			int c = getchar();
 
 			if (c == 0x03) { /* Ctrl-C */
-				printf("Abort by user\n");
+				recovery_debug_printf("Abort by user\n");
 				break;
 			}
 		}
@@ -6487,8 +6511,8 @@ int run_http_recovery(void)
 			recovery_led_poll(&leds);
 		if (prepare_request > 0) {
 			prepare_request = 0;
-			printf("Preparing destructive eMMC stream for %lu bytes...\n",
-			       (ulong)prepare_size);
+			recovery_debug_printf("Preparing destructive eMMC stream for %lu bytes...\n",
+					      (ulong)prepare_size);
 			rc = recovery_mmc_stream_prepare(prepare_target,
 							 prepare_size,
 							 prepare_stream_format);
@@ -6497,21 +6521,21 @@ int run_http_recovery(void)
 				printf("Destructive stream preparation failed: %d\n",
 				       rc);
 			} else {
-				printf("Target erase complete; waiting for image stream.\n");
+				recovery_debug_printf("Target erase complete; waiting for image stream.\n");
 			}
 		}
 		if (flash_request) {
 			flash_request = 0;
-			printf("Upload done, flashing...\n");
+			recovery_debug_printf("Upload done, flashing...\n");
 			rc = flash_image(&status_leds);
 			if (!rc) {
 				if (prog_reboot) {
-					printf("Flashing complete. Rebooting in %dms...\n",
-					       REBOOT_DELAY_MS);
+					recovery_debug_printf("Flashing complete. Rebooting in %dms...\n",
+							      REBOOT_DELAY_MS);
 					reboot_request = 0;
 					sys_timeout(REBOOT_DELAY_MS, reboot_delay_cb, NULL);
 				} else {
-					printf("Action complete. Keeping recovery server running.\n");
+					recovery_debug_printf("Action complete. Keeping recovery server running.\n");
 				}
 			} else {
 				printf("Flashing failed: %d. Keeping server running.\n",
@@ -6523,7 +6547,7 @@ int run_http_recovery(void)
 		if (timeout_ms && !post_ok && !upload_done && !flash_request &&
 		    !reboot_request && prog_phase == 0 &&
 			get_timer(start_ms) >= timeout_ms) {
-			printf("HTTP recovery timeout after %lums\n", timeout_ms);
+			recovery_debug_printf("HTTP recovery timeout after %lums\n", timeout_ms);
 			break;
 		}
 		recovery_watchdog_poll();

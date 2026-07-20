@@ -5949,7 +5949,8 @@ static int ipq_eth_start(struct udevice *dev)
 	if (IS_ENABLED(CONFIG_TFTP_PORT))
 		env_set_ulong("tftpsrcp", tftp_acl_our_port);
 
-	linkup = ipq_eth_refresh_link(priv, false);
+	/* HTTP recovery sets eth_allow_no_link and does not need link chatter. */
+	linkup = ipq_eth_refresh_link(priv, allow_no_link);
 	if (ipq_edma_debug_trace()) {
 		u32 port_id = 0;
 

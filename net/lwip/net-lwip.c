@@ -333,7 +333,6 @@ static struct netif *new_netif(struct udevice *udev, bool with_ip)
 
 	string_to_enetaddr(hwstr, netif->hwaddr);
 	netif->hwaddr_len = ETHARP_HWADDR_LEN;
-	printf("lwIP netif MAC %s\n", hwstr);
 	debug("adding lwIP netif for %s with hwaddr:%s ip:%s ", udev->name,
 	      hwstr, ip4addr_ntoa(&ip));
 	debug("mask:%s ", ip4addr_ntoa(&mask));

@@ -26,6 +26,8 @@ The chainloader solves three board-specific problems:
 | Recovery status LEDs        | Hardware PWM reports preparation, erase, write, completion, and error states |
 | Serial diagnostics          | Board-log analysis and NSS/PPE/EDMA counter snapshots are available for network debugging |
 
+HTTP recovery keeps the serial console quiet during normal operation. Set the U-Boot environment variable `recovery_debug=1` before starting `http_recovery` to enable its optional lifecycle and protocol diagnostics; validation, storage, and network errors remain visible without it. This switch is separate from the on-demand `nss_debug` command and `nss_debug_log` trace setting.
+
 ## First Installation
 
 ### 1. Temporarily Boot the Chainloader FIT
