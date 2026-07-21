@@ -1,6 +1,6 @@
 # Askey SBE1V1K Chainloader and HTTP Recovery
 
-This project provides a stock-`bootm` compatible second-stage U-Boot and an eMMC/GPT recovery environment for the Askey SBE1V1K. The board uses a Qualcomm IPQ9570 SoC, 1 GiB of RAM, and an eMMC boot device.
+This project provides a stock-`bootm` compatible second-stage U-Boot and an eMMC/GPT recovery environment for the Askey SBE1V1K. The board uses a Qualcomm IPQ9570 SoC, 2 GiB of RAM, and an eMMC boot device.
 
 The chainloader solves three board-specific problems:
 
@@ -408,7 +408,7 @@ A raw firmware stream crosses from the fixed kernel span to rootfs at the profil
 
 Erase prefers exact eMMC erase/TRIM when partition and erase-group alignment make it safe. If erase-group rounding could affect an adjacent partition, the implementation zero-fills every logical block in the target instead.
 
-This design uses more eMMC I/O but avoids holding a large image in 1 GiB RAM. It also means that the active system is already damaged once preparation has finished; a failed body transfer cannot roll back automatically.
+This design uses more eMMC I/O but avoids holding a large image in 2 GiB RAM. It also means that the active system is already damaged once preparation has finished; a failed body transfer cannot roll back automatically.
 
 ## Partition Backup Implementation
 
