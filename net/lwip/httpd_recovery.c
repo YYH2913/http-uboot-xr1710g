@@ -2615,6 +2615,114 @@ static int recovery_mmc_stream_append(const void *data, size_t size)
 	return ret;
 }
 
+static int
+recovery_mmc_stream_verify_kernel_fit(const struct recovery_mmc_stream_part *part)
+{
+	struct recovery_image_part kernel;
+	u8 *header;
+	u8 *fit;
+	ulong blksz;
+	size_t fit_size;
+	size_t read_size;
+	lbaint_t blocks;
+	int ret;
+
+	blksz = part->part.blksz ?: part->desc->blksz;
+	if (!blksz || !part->expected)
+		return -EINVAL;
+
+	header = memalign(ARCH_DMA_MINALIGN, blksz);
+	if (!header)
+		return -ENOMEM;
+	ret = 0;
+	if (blk_dread(part->desc, part->part.start, 1, header) != 1) {
+		ret = -EIO;
+		goto out_header;
+	}
+	/*
+	 * The first sector only contains the FDT header. With FIT_FULL_CHECK,
+	 * fit_check_format() also walks the complete blob, so use the header
+	 * check here and verify the complete FIT after its full readback below.
+	 */
+	if (fdt_check_header(header)) {
+		printf("Streamed kernel is not a FIT image after eMMC write\n");
+		ret = -ENOEXEC;
+		goto out_header;
+	}
+
+	fit_size = fit_get_size(header);
+	if (!fit_size || fit_size > part->expected ||
+	    fit_size > recovery_mmc_part_bytes(&part->part)) {
+		printf("Streamed FIT size is outside the written kernel partition\n");
+		ret = -EFBIG;
+		goto out_header;
+	}
+	read_size = ALIGN(fit_size, blksz);
+	blocks = read_size / blksz;
+	fit = memalign(ARCH_DMA_MINALIGN, read_size);
+	if (!fit) {
+		ret = -ENOMEM;
+		goto out_header;
+	}
+	if (blk_dread(part->desc, part->part.start, blocks, fit) != blocks) {
+		ret = -EIO;
+		goto out_fit;
+	}
+
+	kernel.data = fit;
+	kernel.size = fit_size;
+	ret = recovery_validate_sbe1v1k_kernel_fit(&kernel);
+
+out_fit:
+	free(fit);
+out_header:
+	free(header);
+	return ret;
+}
+
+static int
+recovery_mmc_stream_verify_rootfs(const struct recovery_mmc_stream_part *part)
+{
+	struct recovery_image_part rootfs;
+	u8 *header;
+	ulong blksz;
+	int ret;
+
+	blksz = part->part.blksz ?: part->desc->blksz;
+	if (!blksz || part->expected < RECOVERY_SQUASHFS_HEADER_MIN)
+		return -EINVAL;
+
+	header = memalign(ARCH_DMA_MINALIGN, blksz);
+	if (!header)
+		return -ENOMEM;
+	if (blk_dread(part->desc, part->part.start, 1, header) != 1) {
+		free(header);
+		return -EIO;
+	}
+
+	rootfs.data = header;
+	rootfs.size = part->expected;
+	ret = recovery_validate_sbe1v1k_rootfs(&rootfs);
+	free(header);
+
+	return ret;
+}
+
+static int recovery_mmc_stream_verify_sbe1v1k_firmware(void)
+{
+	int ret;
+
+	if (!recovery_board_is_sbe1v1k() ||
+	    recovery_stream.target != TARGET_FIRMWARE)
+		return 0;
+
+	ret = recovery_mmc_stream_verify_kernel_fit(&recovery_stream.parts[0]);
+	if (ret)
+		return ret;
+
+	return recovery_mmc_stream_verify_rootfs(&recovery_stream.parts[1]);
+}
+
 static int recovery_mmc_stream_finish(void)
 {
 	int ret;
@@ -2640,7 +2748,7 @@ static int recovery_mmc_stream_finish(void)
 		return -EIO;
 	}
 
-	return 0;
+	return recovery_mmc_stream_verify_sbe1v1k_firmware();
 }
 
 struct recovery_factory_part {
@@ -3120,6 +3228,21 @@ static bool recovery_is_sbe1v1k_chainloader_fit(const void *fit,
 	       recovery_fit_has_image_node(fit, "uboot-1");
 }
 
+static bool recovery_ram_range_ok(ulong addr, size_t size)
+{
+	ulong ram_start = (ulong)gd->ram_base;
+	ulong ram_size = (ulong)gd->ram_size;
+	ulong ram_end;
+
+	if (!ram_size || addr < ram_start)
+		return false;
+	if (ram_size > ULONG_MAX - ram_start)
+		return false;
+	ram_end = ram_start + ram_size;
+
+	return addr <= ram_end && size <= ram_end - addr;
+}
+
 static int recovery_copy_running_chainloader_fit(void **fitp,
 						 size_t *fit_sizep)
 {
@@ -3136,7 +3259,7 @@ static int recovery_copy_running_chainloader_fit(void **fitp,
 		size_t fit_size;
 		ulong addr = candidates[i];
 
-		if (!addr)
+		if (!addr || !recovery_ram_range_ok(addr, sizeof(struct fdt_header)))
 			continue;
 
 		for (j = 0; j < i; j++) {
@@ -3147,11 +3270,12 @@ static int recovery_copy_running_chainloader_fit(void **fitp,
 			continue;
 
 		fit = (const void *)addr;
-		if (fit_check_format(fit, IMAGE_SIZE_INVAL))
+		if (fdt_check_header(fit))
 			continue;
 
 		fit_size = fit_get_size(fit);
-		if (!fit_size || fit_size > max)
+		if (!fit_size || fit_size > max ||
+		    !recovery_ram_range_ok(addr, fit_size))
 			continue;
 
 		if (!recovery_is_sbe1v1k_chainloader_fit(fit, fit_size))
@@ -3268,9 +3392,7 @@ static int recovery_preserve_chainloader_fit(void **fitp, size_t *fit_sizep)
 	if (ret != -ENOENT)
 		return ret;
 
-	recovery_debug_printf("Running chainloader FIT is not available at 0x%08lx or 0x%08lx; reading the current eMMC partition\n",
-			      RECOVERY_SBE1V1K_FIT_PERSISTENT_ADDR,
-			      RECOVERY_SBE1V1K_FIT_TFTP_ADDR);
+	recovery_debug_printf("No running SBE1V1K chainloader FIT was found in usable RAM; reading the current eMMC partition\n");
 	ret = recovery_read_installed_chainloader_fit(fitp, fit_sizep);
 	if (ret)
 		printf("Cannot preserve the current SBE1V1K chainloader FIT: %d\n",
