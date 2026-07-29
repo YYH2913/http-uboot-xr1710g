@@ -8,25 +8,44 @@
 		reg = <0x0 0x80000000 0x0 0x40000000>;
 	};
 
+	soc {
+		usb_pcs: pcs@1fa07000 {
+			compatible = "airoha,an7581-pcs-usb";
+			reg = <0x0 0x1fa07000 0x0 0x1000>,
+			      <0x0 0x1fa90000 0x0 0x64>,
+			      <0x0 0x1fa90a00 0x0 0x168>,
+			      <0x0 0x1fa94000 0x0 0x450>,
+			      <0x0 0x1fa96000 0x0 0x100>,
+			      <0x0 0x1fa9a000 0x0 0x404>;
+			reg-names = "xsi_mac", "hsgmii_an", "hsgmii_pcs",
+				    "multi_sgmii", "hsgmii_rate_adp", "phya";
+
+			resets = <&scuclk EN7581_HSI_RST>,
+				 <&scuclk EN7581_HSI_MAC_RST>;
+			reset-names = "phy", "mac";
+			status = "okay";
+		};
+	};
+
 	mdio-bus {
 		compatible = "airoha,arht-mdio";
 		#address-cells = <1>;
 		#size-cells = <0>;
 
-		phy5: ethernet-phy@5 {
-			compatible = "ethernet-phy-ieee802.3-c45";
-			reg = <5>;
-			reset-gpios = <&en7581_pinctrl 29 GPIO_ACTIVE_LOW>;
-			reset-assert-us = <40000>;
+		phy13: ethernet-phy@13 {
+			compatible = "ethernet-phy-ieee802.3-c22";
+			reg = <13>;
+			reset-gpios = <&en7581_pinctrl 31 GPIO_ACTIVE_LOW>;
+			reset-assert-us = <1000000>;
 			reset-deassert-us = <150000>;
 		};
 
-		phy8: ethernet-phy@8 {
-			compatible = "ethernet-phy-ieee802.3-c45";
-			reg = <8>;
-			reset-gpios = <&en7581_pinctrl 27 GPIO_ACTIVE_LOW>;
-			reset-assert-us = <40000>;
-			reset-deassert-us = <150000>;
+		phy14: ethernet-phy@14 {
+			reg = <14>;
+		};
+
+		phy15: ethernet-phy@15 {
+			reg = <15>;
 		};
 	};
 };
@@ -39,6 +58,16 @@
 	status = "okay";
 	pinctrl-names = "default";
 	pinctrl-0 = <&mdio_pins>;
-	airoha,phy-poll-start = <5>;
-	airoha,phy-poll-end = <10>;
+	airoha,phy-poll-start = <13>;
+	airoha,phy-poll-end = <15>;
+};
+
+&gdm4 {
+	status = "okay";
+	phy-mode = "2500base-x";
+	phy-handle = <&phy13>;
+	pcs = <&usb_pcs>;
+	airoha,usb-hsgmii;
+	airoha,source-port = <0x19>;
+	airoha,tx-channel = <12>;
 };

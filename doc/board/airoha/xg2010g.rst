@@ -82,20 +82,29 @@ UBI is initialized, environment loading falls back to compiled defaults and
 Ethernet
 --------
 
-U-Boot enables the AN7581 Ethernet block and ``gdm1`` switch path. Two external
-Clause 45 PHYs are described on the FE MDIO controller at addresses 5 and 8.
-Their active-low reset lines are GPIO 29 and GPIO 27 respectively, and the
-switch PHY polling window covers addresses 5 through 10.
+U-Boot enables the AN7581 Ethernet block, the internal ``gdm1`` switch path and
+the external ``gdm4`` 2.5G recovery path. XG2010G routes its Airoha EN8811H
+copper PHY through USB0 Multi-SerDes in fixed-rate HSGMII mode, rather than the
+ETH-USXGMII/RTL8261 path used by XR1710G.
 
-The topology is intentionally close to XR1710G, but XG2010G does not inherit
-XR1710G's PHY interrupt GPIOs, TX/RX pair-swap properties or per-port recovery
-LED mapping. Those are board-level electrical details and must be confirmed on
-real XG2010G hardware before enabling them.
+The EN8811H uses primary MDIO address 13 with auxiliary addresses 14 and 15.
+Its active-low reset is GPIO 31 and is asserted for one second before PHY
+initialization. The USB XSI source port is ``0x19`` and recovery TX descriptors
+use QDMA channel 12, matching the stock ``hsgmii_lan`` USB path. The EN8811H
+MD32 firmware extracted from the stock root filesystem is LZMA-compressed and
+embedded in U-Boot so PHY initialization does not depend on a filesystem.
+
+Set ``recovery_port`` to ``2.5g``, ``2g5``, ``2500`` or ``usb`` to force this
+port. The existing ``4``, ``10g`` and ``lan1`` aliases still select GDM4 for
+compatibility with XR1710G recovery settings.
 
 Hardware status
 ---------------
 
-The partition map, FIT offset, 1 GiB DRAM size, GPIOs, PHY addresses 5 and 8,
-and MAC data format were checked against a stock ``XG2010G_fw_1.0.0.13`` dump.
-Serial boot, both Ethernet PHYs, reset-button entry, and destructive recovery
-still require validation on real hardware before deployment.
+The partition map, FIT offset, 1 GiB DRAM size, MAC data format, USB0 HSGMII
+register windows and MDIO addresses 13 through 15 were checked against a stock
+``XG2010G_fw_1.0.0.13`` dump. The stock environment selects
+``serdes_usb1=111`` and the stock preinit sequence resets GPIO 31 for one
+second before loading the EN8811H and HSGMII LAN drivers. Serial boot, 2.5G
+traffic, reset-button entry and destructive recovery still require validation
+on real hardware before deployment.

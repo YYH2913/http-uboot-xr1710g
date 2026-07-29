@@ -20,6 +20,14 @@ config PHY_AIROHA_EN8811
 	  AIROHA EN8811H supported.
 	  AIROHA AN8811HB supported.
 
+config PHY_AIROHA_EN8811_BUILTIN_FW
+	bool "Embed EN8811H firmware"
+	depends on PHY_AIROHA_EN8811
+	select LZMA
+	help
+	  Embed an LZMA-compressed EN8811H MD32 firmware image in U-Boot.
+	  The environment-script firmware loader remains available as a fallback.
+
 config PHY_AIROHA_PHYLIB
 	bool
 	help

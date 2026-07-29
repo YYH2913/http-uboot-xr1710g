@@ -24,6 +24,9 @@
 #include <dm/device_compat.h>
 #include <u-boot/crc.h>
 #include <linux/phy/phy-common-props.h>
+#if CONFIG_IS_ENABLED(PHY_AIROHA_EN8811_BUILTIN_FW)
+#include <lzma/LzmaTools.h>
+#endif
 
 #include "air_phy_lib.h"
 
@@ -275,6 +278,36 @@ struct en8811h_priv {
 	const char	*script_name;
 };
 
+#if CONFIG_IS_ENABLED(PHY_AIROHA_EN8811_BUILTIN_FW)
+extern const u8 en8811h_fw_lzma_begin[];
+extern const u8 en8811h_fw_lzma_end[];
+
+static int en8811h_read_builtin_fw(void **fw, size_t *fwsize, u32 mem_size)
+{
+	SizeT compressed_size = en8811h_fw_lzma_end - en8811h_fw_lzma_begin;
+	SizeT uncompressed_size = mem_size;
+	void *buffer;
+	int ret;
+
+	buffer = malloc(mem_size);
+	if (!buffer)
+		return -ENOMEM;
+
+	ret = lzmaBuffToBuffDecompress(buffer, &uncompressed_size,
+				       en8811h_fw_lzma_begin, compressed_size);
+	if (ret || uncompressed_size != mem_size) {
+		free(buffer);
+		return -EINVAL;
+	}
+
+	*fw = buffer;
+	*fwsize = uncompressed_size;
+	debug("Found built-in Airoha EN8811H firmware.\n");
+
+	return 0;
+}
+#endif
+
 static int air_pbus_reg_write(struct phy_device *phydev,
 			      u32 pbus_reg, u32 pbus_data)
 {
@@ -502,6 +535,16 @@ static int en8811h_read_fw(void **fw, size_t *fwsize, struct en8811h_priv *priv)
 	u32 mem_size = priv->mem_size;
 	void *buffer;
 	int ret;
+
+#if CONFIG_IS_ENABLED(PHY_AIROHA_EN8811_BUILTIN_FW)
+	if (mem_size == EN8811H_MD32_DM_SIZE + EN8811H_MD32_DSP_SIZE) {
+		ret = en8811h_read_builtin_fw(fw, fwsize, mem_size);
+		if (!ret)
+			return 0;
+
+		debug("Built-in EN8811H firmware unavailable: %d\n", ret);
+	}
+#endif
 
 	buffer = malloc(mem_size);
 	if (!buffer)

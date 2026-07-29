@@ -1,0 +1,18 @@
+EN8811H firmware used by XG2010G
+================================
+
+The embedded LZMA stream is the concatenation of these files extracted from
+the stock XG2010G root filesystem:
+
+  /lib/firmware/EthMD32.dm.bin   (16384 bytes)
+  /lib/firmware/EthMD32.DSP.bin  (131072 bytes)
+
+Uncompressed image:
+
+  size:   147456 bytes
+  sha256: 36e4d98e6a9b726255e004737471d6c7dd56cc28a0ec81ad340016fd0d87ae27
+
+Compressed image (en8811h-xg2010g.lzma):
+
+  size:   41844 bytes
+  sha256: 9ec8b9d3b041e9cc37411d9a5cfa7006bfd5a08166ec25cfe189e4637f614122
