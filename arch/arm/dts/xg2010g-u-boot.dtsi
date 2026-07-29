@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: GPL-2.0+
+
+#include "an7581-u-boot.dtsi"
+
+/ {
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x40000000>;
+	};
+
+	mdio-bus {
+		compatible = "airoha,arht-mdio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		phy5: ethernet-phy@5 {
+			compatible = "ethernet-phy-ieee802.3-c45";
+			reg = <5>;
+			reset-gpios = <&en7581_pinctrl 29 GPIO_ACTIVE_LOW>;
+			reset-assert-us = <40000>;
+			reset-deassert-us = <150000>;
+		};
+
+		phy8: ethernet-phy@8 {
+			compatible = "ethernet-phy-ieee802.3-c45";
+			reg = <8>;
+			reset-gpios = <&en7581_pinctrl 27 GPIO_ACTIVE_LOW>;
+			reset-assert-us = <40000>;
+			reset-deassert-us = <150000>;
+		};
+	};
+};
+
+&snfi {
+	status = "okay";
+};
+
+&switch {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&mdio_pins>;
+	airoha,phy-poll-start = <5>;
+	airoha,phy-poll-end = <10>;
+};

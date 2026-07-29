@@ -1,0 +1,84 @@
+.. SPDX-License-Identifier: GPL-2.0+
+
+Axon Networks XG2010G
+*********************
+
+The XG2010G is an optical network terminal based on the Airoha AN7581. This
+port is derived from the stock 512 MiB SPI-NAND image and keeps the vendor
+flash boundaries intact.
+
+Building
+--------
+
+Build the second-stage U-Boot image with an AArch64 cross compiler::
+
+   make xg2010g_defconfig
+   make CROSS_COMPILE=aarch64-linux-gnu-
+
+``u-boot.bin`` and ``u-boot.img`` are build inputs, not directly flashable
+XG2010G slot images. The vendor first-stage loader requires a packaged slot
+image with its FIT at offset ``0x2100``. That packaging step is not provided by
+this tree.
+
+Flash layout
+------------
+
+The control device tree describes the stock layout exactly:
+
+================ ========== ==========
+Partition        Offset     Size
+================ ========== ==========
+bootloader       0x00000000 2 MiB
+uenv             0x00200000 2 MiB
+dsd              0x00400000 2 MiB
+tclinux          0x00600000 64 MiB
+tclinux_slave    0x04600000 64 MiB
+system           0x08600000 256 MiB
+rootfs_data      0x18600000 8 MiB
+reserved         0x18e00000 47 MiB
+art              0x1bd00000 3 MiB
+reserved_bmt     0x1c000000 64 MiB
+================ ========== ==========
+
+Only the two firmware slots are writable from U-Boot. Bootloader data, DSD,
+system data, ART, the unknown gap before ART, and the final BMT/BBT area are
+read-only.
+
+The complete 64 MiB ``tclinux_slave`` partition is available to HTTP recovery.
+This is larger than the FIT in the examined stock firmware and leaves room for
+larger vendor-slot images without extending into adjacent partitions.
+
+Boot and recovery
+-----------------
+
+The default boot command runs ``xg2010g_load`` on ``tclinux_slave``. The command
+skips bad NAND blocks, reads the FIT header at logical offset ``0x2100``, and
+loads only the FIT's declared total size before calling ``bootm``.
+
+Holding reset (GPIO 0, active low) during U-Boot startup enters HTTP recovery
+at ``http://192.168.255.1``. Firmware uploads must contain the complete vendor
+slot prefix and a structurally valid FIT at ``0x2100``. Recovery erases and
+rewrites only ``tclinux_slave``.
+
+The U-Boot upload target is capped at the first 1 MiB of ``tclinux`` and accepts
+only a packaged chainloader slot image. Do not upload a bare FIT,
+``u-boot.bin``, or ``u-boot.img``.
+
+Factory data and environment
+----------------------------
+
+LAN and WAN MAC addresses are read from the newline-separated key/value data
+at the start of ``dsd``. Other DSD fields are neither imported nor modified.
+
+Persistent U-Boot environment storage is deliberately disabled. The stock
+``uenv`` partition contains the vendor environment followed by second-stage
+loader data in every later eraseblock, so there is no verified empty block for
+``saveenv``. Compiled defaults are used on every boot.
+
+Hardware status
+---------------
+
+The partition map, FIT offset, 1 GiB DRAM size, GPIOs, PHY addresses 5 and 8,
+and MAC data format were checked against a stock ``XG2010G_fw_1.0.0.13`` dump.
+Serial boot, both Ethernet PHYs, reset-button entry, and destructive recovery
+still require validation on real hardware before deployment.

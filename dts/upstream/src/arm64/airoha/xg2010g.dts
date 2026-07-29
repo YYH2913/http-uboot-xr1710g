@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/dts-v1/;
+
+/* The vendor first-stage loader installs ATF here. */
+/memreserve/ 0x80000000 0x200000;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+#include "en7581.dtsi"
+
+/ {
+	model = "Axon Networks XG2010G";
+	compatible = "axon,xg2010g", "econet,xg2010g",
+		     "econet,en7581", "airoha,an7581", "airoha,en7581";
+	recovery-gpios = <&en7581_pinctrl 0 GPIO_ACTIVE_LOW>;
+
+	aliases {
+		serial0 = &uart1;
+		led-boot = &led_status_red;
+		led-failsafe = &led_status_blue;
+		led-upgrade = &led_status_white;
+		led-running = &led_status_green;
+	};
+
+	chosen {
+		bootargs = "console=ttyS0,115200 earlycon";
+		stdout-path = "serial0:115200n8";
+		linux,usable-memory-range = <0x0 0x80200000 0x0 0x3fe00000>;
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x40000000>;
+	};
+
+	keys {
+		compatible = "gpio-keys";
+
+		key-restart {
+			label = "reset";
+			gpios = <&en7581_pinctrl 0 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RESTART>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led_status_red: led-status-red {
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&en7581_pinctrl 43 GPIO_ACTIVE_LOW>;
+			default-state = "on";
+		};
+
+		led_status_green: led-status-green {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&en7581_pinctrl 44 GPIO_ACTIVE_LOW>;
+		};
+
+		led_status_blue: led-status-blue {
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&en7581_pinctrl 45 GPIO_ACTIVE_LOW>;
+		};
+
+		led_status_white: led-status-white {
+			color = <LED_COLOR_ID_WHITE>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&en7581_pinctrl 33 GPIO_ACTIVE_LOW>;
+		};
+
+		led-pon-activity-green {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_ACTIVITY;
+			gpios = <&en7581_pinctrl 14 GPIO_ACTIVE_LOW>;
+		};
+
+		led-pon-link-green {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_WAN_ONLINE;
+			gpios = <&en7581_pinctrl 15 GPIO_ACTIVE_LOW>;
+		};
+
+		led-pon-link-red {
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_WAN;
+			gpios = <&en7581_pinctrl 16 GPIO_ACTIVE_LOW>;
+		};
+
+		led-lan-green {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_LAN;
+			gpios = <&en7581_pinctrl 46 GPIO_ACTIVE_LOW>;
+		};
+
+		led-lan-yellow {
+			color = <LED_COLOR_ID_YELLOW>;
+			function = LED_FUNCTION_LAN;
+			gpios = <&en7581_pinctrl 42 GPIO_ACTIVE_LOW>;
+		};
+
+		led-phy-tx-disable {
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_FAULT;
+			gpios = <&en7581_pinctrl 38 GPIO_ACTIVE_HIGH>;
+			default-state = "on";
+		};
+	};
+};
+
+&en7581_pinctrl {
+	gpio-ranges = <&en7581_pinctrl 0 13 47>;
+
+	mdio_pins: mdio-pins {
+		mux {
+			function = "mdio";
+			groups = "mdio";
+		};
+
+		conf {
+			pins = "gpio2";
+			output-high;
+		};
+	};
+};
+
+&spi_nand {
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@0 {
+			label = "bootloader";
+			reg = <0x00000000 0x00200000>;
+			read-only;
+		};
+
+		partition@200000 {
+			label = "uenv";
+			reg = <0x00200000 0x00200000>;
+			read-only;
+		};
+
+		partition@400000 {
+			label = "dsd";
+			reg = <0x00400000 0x00200000>;
+			read-only;
+		};
+
+		partition@600000 {
+			label = "tclinux";
+			reg = <0x00600000 0x04000000>;
+		};
+
+		partition@4600000 {
+			label = "tclinux_slave";
+			reg = <0x04600000 0x04000000>;
+		};
+
+		partition@8600000 {
+			label = "system";
+			reg = <0x08600000 0x10000000>;
+			read-only;
+		};
+
+		partition@18600000 {
+			label = "rootfs_data";
+			reg = <0x18600000 0x00800000>;
+			read-only;
+		};
+
+		partition@18e00000 {
+			label = "reserved";
+			reg = <0x18e00000 0x02f00000>;
+			read-only;
+		};
+
+		partition@1bd00000 {
+			label = "art";
+			reg = <0x1bd00000 0x00300000>;
+			read-only;
+		};
+
+		partition@1c000000 {
+			label = "reserved_bmt";
+			reg = <0x1c000000 0x04000000>;
+			read-only;
+		};
+	};
+};
+
+&eth {
+	status = "okay";
+};
+
+&gdm1 {
+	status = "okay";
+};

@@ -3,3 +3,11 @@ M:	Christian Marangi <ansuelsmth@gmail.com>
 S:	Maintained
 N:      airoha
 N:      an7581
+
+XG2010G
+S:	Maintained
+F:	arch/arm/dts/xg2010g-u-boot.dtsi
+F:	board/airoha/an7581/xg2010g.env
+F:	configs/xg2010g_defconfig
+F:	doc/board/airoha/
+F:	dts/upstream/src/arm64/airoha/xg2010g.dts

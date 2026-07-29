@@ -6,17 +6,21 @@
 #include <asm/gpio.h>
 #include <asm/global_data.h>
 #include <asm/io.h>
+#include <command.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dm/device.h>
 #include <dm/ofnode.h>
 #include <env.h>
 #include <fdt_support.h>
+#include <image.h>
+#include <mapmem.h>
 #include <mtd.h>
 #include <net-common.h>
 #include <ubi_uboot.h>
 #include <linux/bitops.h>
 #include <linux/err.h>
 #include <linux/kconfig.h>
+#include <linux/libfdt.h>
 #include <linux/string.h>
 
 DECLARE_GLOBAL_DATA_PTR;
@@ -45,6 +49,10 @@ DECLARE_GLOBAL_DATA_PTR;
 #define XR1710G_FACTORY_WAN_MAC_OFFSET	0x5000
 #define XR1710G_FACTORY_LAN_MAC_OFFSET	0x6000
 #define XR1710G_FACTORY_SIZE		(XR1710G_FACTORY_LAN_MAC_OFFSET + ARP_HLEN)
+
+#define XG2010G_DSD_PART		"dsd"
+#define XG2010G_DSD_ENV_SIZE		0x4000
+#define XG2010G_FIRMWARE_FIT_OFFSET	0x2100
 
 struct xr1710g_ubi_layout {
 	const char *version;
@@ -77,6 +85,12 @@ static bool xr1710g_is_compatible(void)
 	       of_machine_is_compatible("econet,xr1710g-ubi") ||
 	       of_machine_is_compatible("gemtek,xr1710g") ||
 	       of_machine_is_compatible("gemtek,xr1710g-ubi");
+}
+
+static bool xg2010g_is_compatible(void)
+{
+	return of_machine_is_compatible("axon,xg2010g") ||
+	       of_machine_is_compatible("econet,xg2010g");
 }
 
 static void xr1710g_clrsetbits_le32(uintptr_t addr, u32 clear, u32 set)
@@ -158,6 +172,61 @@ static int xr1710g_recovery_button_pressed_raw(ofnode root)
 	return gpio_flags & GPIO_ACTIVE_LOW ? !ret : ret;
 }
 
+static int an7581_mtd_read_logical(struct mtd_info *mtd, loff_t logical_ofs,
+				    size_t len, void *buf)
+{
+	u8 *dst = buf;
+	loff_t block;
+
+	if (!mtd || !mtd->erasesize || logical_ofs < 0)
+		return -EINVAL;
+
+	for (block = 0; block < mtd->size && len; block += mtd->erasesize) {
+		size_t block_len = min_t(u64, mtd->erasesize, mtd->size - block);
+		size_t chunk, retlen = 0;
+		int ret;
+
+		ret = mtd_block_isbad(mtd, block);
+		if (ret < 0)
+			return ret;
+		if (ret > 0)
+			continue;
+
+		if (logical_ofs >= block_len) {
+			logical_ofs -= block_len;
+			continue;
+		}
+
+		chunk = min(len, block_len - (size_t)logical_ofs);
+		ret = mtd_read(mtd, block + logical_ofs, chunk, &retlen, dst);
+		if ((ret && ret != -EUCLEAN) || retlen != chunk)
+			return ret ? ret : -EIO;
+
+		dst += chunk;
+		len -= chunk;
+		logical_ofs = 0;
+	}
+
+	return len ? -ENOSPC : 0;
+}
+
+static int an7581_read_mtd_partition(const char *part, loff_t offset,
+				      size_t size, void *buf)
+{
+	struct mtd_info *mtd;
+	int ret;
+
+	mtd_probe_devices();
+	mtd = get_mtd_device_nm(part);
+	if (IS_ERR_OR_NULL(mtd))
+		return IS_ERR(mtd) ? PTR_ERR(mtd) : -ENODEV;
+
+	ret = an7581_mtd_read_logical(mtd, offset, size, buf);
+	put_mtd_device(mtd);
+
+	return ret;
+}
+
 static int xr1710g_read_vendor_data(size_t offset, size_t size, void *buf)
 {
 	struct mtd_info *mtd;
@@ -198,8 +267,8 @@ static int xr1710g_read_dsd_eeprom(u8 *buf)
 	return 0;
 }
 
-static int xr1710g_dsd_get_var(const char *buf, size_t len, const char *key,
-				 char *value, size_t value_len)
+static int an7581_dsd_get_var(const char *buf, size_t len, const char *key,
+			       char *value, size_t value_len)
 {
 	size_t key_len = strlen(key);
 	const char *cur = buf;
@@ -256,13 +325,54 @@ static int xr1710g_get_dsd_ethaddrs(u8 *lan_mac, u8 *wan_mac)
 
 	buf[XR1710G_DSD_ENV_SIZE] = '\0';
 
-	ret = xr1710g_dsd_get_var(buf, XR1710G_DSD_ENV_SIZE, "lan_mac=",
-				  lan_str, sizeof(lan_str));
+	ret = an7581_dsd_get_var(buf, XR1710G_DSD_ENV_SIZE, "lan_mac=",
+				lan_str, sizeof(lan_str));
 	if (ret)
 		goto out;
 
-	ret = xr1710g_dsd_get_var(buf, XR1710G_DSD_ENV_SIZE, "wan_mac=",
-				  wan_str, sizeof(wan_str));
+	ret = an7581_dsd_get_var(buf, XR1710G_DSD_ENV_SIZE, "wan_mac=",
+				wan_str, sizeof(wan_str));
+	if (ret)
+		goto out;
+
+	string_to_enetaddr(lan_str, lan_mac);
+	string_to_enetaddr(wan_str, wan_mac);
+	if (!is_valid_ethaddr(lan_mac) || !is_valid_ethaddr(wan_mac)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = 0;
+
+out:
+	free(buf);
+	return ret;
+}
+
+static int xg2010g_get_dsd_ethaddrs(u8 *lan_mac, u8 *wan_mac)
+{
+	char *buf;
+	char lan_str[ARP_HLEN_ASCII + 1];
+	char wan_str[ARP_HLEN_ASCII + 1];
+	int ret;
+
+	buf = malloc(XG2010G_DSD_ENV_SIZE + 1);
+	if (!buf)
+		return -ENOMEM;
+
+	ret = an7581_read_mtd_partition(XG2010G_DSD_PART, 0,
+					 XG2010G_DSD_ENV_SIZE, buf);
+	if (ret)
+		goto out;
+
+	buf[XG2010G_DSD_ENV_SIZE] = '\0';
+	ret = an7581_dsd_get_var(buf, XG2010G_DSD_ENV_SIZE, "lan_mac=",
+				lan_str, sizeof(lan_str));
+	if (ret)
+		goto out;
+
+	ret = an7581_dsd_get_var(buf, XG2010G_DSD_ENV_SIZE, "wan_mac=",
+				wan_str, sizeof(wan_str));
 	if (ret)
 		goto out;
 
@@ -617,6 +727,137 @@ static void xr1710g_fixup_fdt_macs(void *blob)
 	}
 }
 
+static void xg2010g_sync_runtime_ethaddrs(void)
+{
+	u8 lan_mac[ARP_HLEN], wan_mac[ARP_HLEN];
+	int ret;
+
+	if (!xg2010g_is_compatible())
+		return;
+
+	ret = xg2010g_get_dsd_ethaddrs(lan_mac, wan_mac);
+	if (ret) {
+		printf("XG2010G: failed to read MAC addresses from DSD: %d\n", ret);
+		return;
+	}
+
+	eth_env_set_enetaddr("ethaddr", lan_mac);
+	eth_env_set_enetaddr("eth1addr", wan_mac);
+}
+
+static void xg2010g_fixup_fdt_macs(void *blob)
+{
+	u8 lan_mac[ARP_HLEN], wan_mac[ARP_HLEN];
+	int i, ret;
+
+	if (!xg2010g_is_compatible() ||
+	    xg2010g_get_dsd_ethaddrs(lan_mac, wan_mac))
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(xr1710g_fdt_lan_mac_paths); i++) {
+		ret = xr1710g_fdt_set_mac(blob, xr1710g_fdt_lan_mac_paths[i],
+					  lan_mac);
+		if (ret && ret != -FDT_ERR_NOTFOUND)
+			printf("XG2010G: failed to update MAC for %s: %d\n",
+			       xr1710g_fdt_lan_mac_paths[i], ret);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(xr1710g_fdt_wan_mac_paths); i++) {
+		ret = xr1710g_fdt_set_mac(blob, xr1710g_fdt_wan_mac_paths[i],
+					  wan_mac);
+		if (ret && ret != -FDT_ERR_NOTFOUND)
+			printf("XG2010G: failed to update MAC for %s: %d\n",
+			       xr1710g_fdt_wan_mac_paths[i], ret);
+	}
+}
+
+static int do_xg2010g_load(struct cmd_tbl *cmdtp, int flag, int argc,
+			    char *const argv[])
+{
+	struct fdt_header header;
+	struct mtd_info *mtd;
+	void *fit;
+	ulong addr;
+	u32 fit_size;
+	int ret;
+
+	if (argc != 3)
+		return CMD_RET_USAGE;
+
+	if (!xg2010g_is_compatible()) {
+		printf("xg2010g_load is only available on XG2010G\n");
+		return CMD_RET_FAILURE;
+	}
+
+	addr = hextoul(argv[2], NULL);
+	mtd_probe_devices();
+	mtd = get_mtd_device_nm(argv[1]);
+	if (IS_ERR_OR_NULL(mtd)) {
+		printf("XG2010G: MTD partition '%s' was not found\n", argv[1]);
+		return CMD_RET_FAILURE;
+	}
+
+	ret = an7581_mtd_read_logical(mtd, XG2010G_FIRMWARE_FIT_OFFSET,
+				       sizeof(header), &header);
+	if (ret)
+		goto out_error;
+
+	if (fdt32_to_cpu(header.magic) != FDT_MAGIC) {
+		printf("XG2010G: no FIT magic at logical offset 0x%x in '%s'\n",
+		       XG2010G_FIRMWARE_FIT_OFFSET, argv[1]);
+		ret = -ENOEXEC;
+		goto out_error;
+	}
+
+	fit_size = fdt32_to_cpu(header.totalsize);
+	if (fit_size < sizeof(header) ||
+	    fit_size > mtd->size - XG2010G_FIRMWARE_FIT_OFFSET) {
+		printf("XG2010G: invalid FIT size 0x%x in '%s'\n",
+		       fit_size, argv[1]);
+		ret = -EFBIG;
+		goto out_error;
+	}
+
+	if (addr < gd->ram_base || addr >= gd->ram_base + gd->ram_size ||
+	    fit_size > gd->ram_base + gd->ram_size - addr) {
+		printf("XG2010G: FIT does not fit in RAM at 0x%lx\n", addr);
+		ret = -ENOMEM;
+		goto out_error;
+	}
+
+	fit = map_sysmem(addr, fit_size);
+	if (!fit) {
+		ret = -ENOMEM;
+		goto out_error;
+	}
+
+	ret = an7581_mtd_read_logical(mtd, XG2010G_FIRMWARE_FIT_OFFSET,
+				       fit_size, fit);
+	if (!ret)
+		ret = fit_check_format(fit, fit_size);
+	unmap_sysmem(fit);
+	if (ret)
+		goto out_error;
+
+	env_set_hex("fileaddr", addr);
+	env_set_hex("filesize", fit_size);
+	printf("XG2010G: loaded 0x%x-byte FIT from '%s' to 0x%lx\n",
+	       fit_size, argv[1], addr);
+	put_mtd_device(mtd);
+
+	return CMD_RET_SUCCESS;
+
+out_error:
+	printf("XG2010G: failed to load firmware FIT: %d\n", ret);
+	put_mtd_device(mtd);
+	return CMD_RET_FAILURE;
+}
+
+U_BOOT_CMD(xg2010g_load, 3, 0, do_xg2010g_load,
+	"load an XG2010G vendor-slot FIT while skipping bad NAND blocks",
+	"<mtd-partition> <address>"
+);
+
 int board_init(void)
 {
 	/* address of boot parameters */
@@ -627,14 +868,11 @@ int board_init(void)
 
 int run_http_recovery(void);
 
-static int xr1710g_recovery_button_pressed(void)
+static int an7581_recovery_button_pressed(void)
 {
 	struct gpio_desc rec_gpio;
 	ofnode root;
 	int ret;
-
-	if (!xr1710g_is_compatible())
-		return 0;
 
 	memset(&rec_gpio, 0, sizeof(rec_gpio));
 	root = ofnode_path("/");
@@ -655,15 +893,19 @@ int board_late_init(void)
 	const char *ubi_part;
 	ulong recovery_addr;
 
-	xr1710g_sync_runtime_ethaddrs();
-	ubi_part = xr1710g_detect_ubi_part();
-	snprintf(boot_ubi, sizeof(boot_ubi),
-		 "ubi part %s && run boot_production", ubi_part);
-	env_set("boot_ubi", boot_ubi);
-	if (xr1710g_ubi_layout_available)
-		xr1710g_sync_factory_part(ubi_part);
+	if (xg2010g_is_compatible()) {
+		xg2010g_sync_runtime_ethaddrs();
+	} else if (xr1710g_is_compatible()) {
+		xr1710g_sync_runtime_ethaddrs();
+		ubi_part = xr1710g_detect_ubi_part();
+		snprintf(boot_ubi, sizeof(boot_ubi),
+			 "ubi part %s && run boot_production", ubi_part);
+		env_set("boot_ubi", boot_ubi);
+		if (xr1710g_ubi_layout_available)
+			xr1710g_sync_factory_part(ubi_part);
+	}
 
-	if (!xr1710g_recovery_button_pressed())
+	if (!an7581_recovery_button_pressed())
 		return 0;
 
 	printf("Recovery button detected, starting web recovery...\n");
@@ -696,7 +938,10 @@ int ft_board_setup(void *blob, struct bd_info *bd)
 	if (!blob)
 		return 0;
 
-	xr1710g_fixup_fdt_macs(blob);
+	if (xg2010g_is_compatible())
+		xg2010g_fixup_fdt_macs(blob);
+	else
+		xr1710g_fixup_fdt_macs(blob);
 
 	return 0;
 }

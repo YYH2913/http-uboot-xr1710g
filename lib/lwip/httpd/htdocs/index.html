@@ -3,7 +3,7 @@
 <head>
 <meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>XR1710G Recovery Mode</title>
+<title>AN7581 Recovery Mode</title>
 <style>
 :root{
   color-scheme:light;
@@ -331,7 +331,7 @@ button,input,select{font:inherit;letter-spacing:0}
 <div class='app'>
   <aside class='sidebar'>
     <div class='brand'>
-      <div><strong>XR1710G Recovery Mode</strong><span>Recovery WebUI</span></div>
+      <div><strong id='brand-name'>AN7581 Recovery Mode</strong><span>Recovery WebUI</span></div>
     </div>
     <p class='nav-label'>Recovery</p>
     <nav class='nav' aria-label='Recovery target'>
@@ -418,7 +418,7 @@ button,input,select{font:inherit;letter-spacing:0}
           </aside>
         </div>
       </section>
-      <footer class='footer' id='footer-version'>XR1710G HTTP Recovery</footer>
+      <footer class='footer' id='footer-version'>AN7581 HTTP Recovery</footer>
     </div>
   </main>
 </div>
@@ -426,6 +426,7 @@ button,input,select{font:inherit;letter-spacing:0}
 <script>
 var activeTarget='firmware';
 var selectedLayout='2.0';
+var rawFirmware=false;
 var selectedFile=null;
 var busy=false;
 var pollTimer=null;
@@ -445,7 +446,7 @@ var profiles={
   },
   uboot:{
     title:'Update U-Boot',
-    copy:'Upload an XR1710G chainloader image. Only the raw U-Boot slot will be written.',
+	    copy:'Upload a packaged chainloader image. Only the raw U-Boot slot will be written.',
     target:'SPI-NAND @ 0x600000',
     scope:'Write the 1 MiB chainloader slot',
     preserve:'All UBI firmware volumes and configuration data',
@@ -476,7 +477,7 @@ function profile(){return profiles[activeTarget]}
 
 function updateLayout(){
   var layout=layouts[selectedLayout]||layouts['2.0'];
-  layoutBlock.hidden=activeTarget!=='firmware';
+  layoutBlock.hidden=activeTarget!=='firmware'||rawFirmware;
   layoutSelect.value=selectedLayout;
   layoutHelp.textContent=layout.help;
   layoutHelp.className='layout-help'+(layout.warning?' warning':'');
@@ -671,7 +672,7 @@ async function upload(){
     setBusy(false);
   });
 	  var uploadUri='/upload/'+activeTarget;
-	  if(activeTarget==='firmware')uploadUri+='?layout='+encodeURIComponent(selectedLayout);
+	  if(activeTarget==='firmware'&&!rawFirmware)uploadUri+='?layout='+encodeURIComponent(selectedLayout);
 	  xhr.open('POST',uploadUri,true);
   xhr.setRequestHeader('Content-Type','application/octet-stream');
   xhr.send(payload);
@@ -695,14 +696,33 @@ uploadButton.addEventListener('click',upload);
   setTarget('firmware');
   try{
     var response=await fetch('/about',{cache:'no-store'});
-    var data=await response.json();
-	    if(data&&data.u_boot){
-      document.getElementById('version').textContent=data.u_boot;
-	      document.getElementById('footer-version').textContent=data.u_boot;
+	    var data=await response.json();
+	    if(data&&data.board){
+	      document.getElementById('brand-name').textContent=data.board+' Recovery Mode';
+	      document.title=data.board+' Recovery Mode';
 	    }
-	    if(data&&data.detected_layout){
+	    if(data&&data.firmware_mode==='raw'){
+	      rawFirmware=true;
+	      profiles.firmware={
+	        title:'Firmware Recovery',
+	        copy:'Upload a complete vendor firmware-slot image for the backup boot slot.',
+	        target:'tclinux_slave (64 MiB)',
+	        scope:'Erase and rewrite the complete backup firmware slot',
+	        preserve:'Primary U-Boot slot, DSD, system data, ART and reserved NAND areas',
+	        help:'Vendor-slot images must be at least 1 MiB and contain a FIT at offset 0x2100',
+	        action:'Upload and Recover',
+	        notices:['Do not power off the device during recovery.','The complete 64 MiB backup slot is erased before writing.','The vendor prefix and FIT structure are validated before writing.','The device restarts automatically when recovery completes.']
+	      };
+	      document.getElementById('detected-layout').textContent='64 MiB raw backup slot';
+	    }
+	    if(data&&data.u_boot){
+	      document.getElementById('version').textContent=data.u_boot;
+	      document.getElementById('footer-version').textContent=(data.board?data.board+' - ':'')+data.u_boot;
+	    }
+	    if(data&&data.detected_layout&&data.firmware_mode!=='raw'){
 	      document.getElementById('detected-layout').textContent='UBI '+data.detected_layout;
 	    }
+	    setTarget(activeTarget);
   }catch(error){}
 })();
 </script>

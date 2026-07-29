@@ -7,6 +7,7 @@
 #include <dm.h>
 #include <dm/ofnode.h>
 #include <env.h>
+#include <image.h>
 #include <log.h>
 #include <malloc.h>
 #include <memalign.h>
@@ -241,15 +242,6 @@ struct recovery_target {
 	bool ubi_needs_format;
 };
 
-struct recovery_led_ctrl {
-	struct udevice *mdio_dev;
-	ulong last_poll;
-	ulong last_phy_poll;
-	ulong last_mdio_error;
-	bool mdio_fault;
-	int speed[RECOVERY_LED_PORTS];
-};
-
 struct recovery_gpio_pin {
 	struct gpio_desc desc;
 	ofnode node;
@@ -257,6 +249,19 @@ struct recovery_gpio_pin {
 	s8 last_on;
 	bool active_low;
 	bool valid;
+};
+
+struct recovery_led_ctrl {
+	struct udevice *mdio_dev;
+	struct recovery_gpio_pin green[RECOVERY_LED_PORTS];
+	struct recovery_gpio_pin yellow[RECOVERY_LED_PORTS];
+	u8 phy_addr[RECOVERY_LED_PORTS];
+	ulong last_poll;
+	ulong last_phy_poll;
+	ulong last_mdio_error;
+	bool mdio_fault;
+	int port_count;
+	int speed[RECOVERY_LED_PORTS];
 };
 
 struct recovery_status_led_ctrl {
@@ -283,10 +288,6 @@ struct recovery_dhcp_server {
 	ip4_addr_t broadcast;
 	ip4_addr_t dns;
 };
-
-static const int recovery_led_phy_addrs[RECOVERY_LED_PORTS] = { 9, 10 };
-static const u8 recovery_green_led_gpios[RECOVERY_LED_PORTS] = { 43, 44 };
-static const u8 recovery_yellow_led_gpios[RECOVERY_LED_PORTS] = { 33, 34 };
 
 static void recovery_led_ctrl_free(struct recovery_led_ctrl *ctrl)
 {
@@ -378,9 +379,10 @@ static void recovery_gpio_set_value(u8 gpio, bool active_low, int active)
 	recovery_clrsetbits_le32(reg, bit, set);
 }
 
-static void recovery_led_set_pin(u8 gpio, int on)
+static void recovery_led_set_pin(struct recovery_gpio_pin *pin, int on)
 {
-	recovery_gpio_set_value(gpio, true, on);
+	if (pin->valid)
+		recovery_gpio_set_value(pin->gpio, pin->active_low, on);
 }
 
 static void recovery_led_stop(struct recovery_led_ctrl *ctrl)
@@ -390,9 +392,9 @@ static void recovery_led_stop(struct recovery_led_ctrl *ctrl)
 	if (!ctrl)
 		return;
 
-	for (i = 0; i < RECOVERY_LED_PORTS; i++) {
-		recovery_led_set_pin(recovery_green_led_gpios[i], 0);
-		recovery_led_set_pin(recovery_yellow_led_gpios[i], 0);
+	for (i = 0; i < ctrl->port_count; i++) {
+		recovery_led_set_pin(&ctrl->green[i], 0);
+		recovery_led_set_pin(&ctrl->yellow[i], 0);
 	}
 }
 
@@ -433,7 +435,8 @@ static ofnode recovery_led_alias_node(const char *alias)
 	return ofnode_path(path);
 }
 
-static int recovery_led_node_to_gpio(ofnode node, struct recovery_gpio_pin *pin)
+static int recovery_node_prop_to_gpio(ofnode node, const char *prop, int index,
+				      struct recovery_gpio_pin *pin)
 {
 	struct ofnode_phandle_args args;
 	int ret;
@@ -443,7 +446,7 @@ static int recovery_led_node_to_gpio(ofnode node, struct recovery_gpio_pin *pin)
 	if (!ofnode_valid(node))
 		return -ENOENT;
 
-	ret = ofnode_parse_phandle_with_args(node, "gpios", "#gpio-cells", 0, 0,
+	ret = ofnode_parse_phandle_with_args(node, prop, "#gpio-cells", 0, index,
 					     &args);
 	if (ret)
 		return ret;
@@ -459,6 +462,11 @@ static int recovery_led_node_to_gpio(ofnode node, struct recovery_gpio_pin *pin)
 	pin->valid = true;
 
 	return 0;
+}
+
+static int recovery_led_node_to_gpio(ofnode node, struct recovery_gpio_pin *pin)
+{
+	return recovery_node_prop_to_gpio(node, "gpios", 0, pin);
 }
 
 static void recovery_status_led_add(struct recovery_status_led_ctrl *ctrl,
@@ -1183,10 +1191,32 @@ static void recovery_dhcp_server_stop(struct recovery_dhcp_server *srv)
 
 static int recovery_led_init(struct recovery_led_ctrl *ctrl)
 {
-	ofnode mdio_node;
+	ofnode mdio_node, root;
 	int i, ret;
 
 	memset(ctrl, 0, sizeof(*ctrl));
+	root = ofnode_path("/");
+	mdio_node = ofnode_parse_phandle(root, "recovery-link-mdio", 0);
+	if (!ofnode_valid(mdio_node))
+		return 0;
+
+	for (i = 0; i < RECOVERY_LED_PORTS; i++) {
+		u32 phy_addr;
+
+		if (ofnode_read_u32_index(root, "recovery-link-phy-addrs", i,
+					  &phy_addr) || phy_addr > U8_MAX ||
+		    recovery_node_prop_to_gpio(root, "recovery-green-led-gpios",
+					       i, &ctrl->green[i]) ||
+		    recovery_node_prop_to_gpio(root, "recovery-yellow-led-gpios",
+					       i, &ctrl->yellow[i]))
+			break;
+
+		ctrl->phy_addr[i] = phy_addr;
+		ctrl->port_count++;
+	}
+
+	if (!ctrl->port_count)
+		return 0;
 
 	/* Make sure PHY LED mux is disabled so software can own the lines. */
 	recovery_clrsetbits_le32(RECOVERY_CHIP_SCU_BASE + RECOVERY_REG_GPIO_2ND_I2C_MODE,
@@ -1195,16 +1225,12 @@ static int recovery_led_init(struct recovery_led_ctrl *ctrl)
 				 RECOVERY_GPIO_LAN1_LED0_MODE_MASK |
 				 RECOVERY_GPIO_LAN1_LED1_MODE_MASK, 0);
 
-	for (i = 0; i < RECOVERY_LED_PORTS; i++) {
-		recovery_gpio_prepare_output(recovery_green_led_gpios[i]);
-		recovery_gpio_prepare_output(recovery_yellow_led_gpios[i]);
-		recovery_led_set_pin(recovery_green_led_gpios[i], 0);
-		recovery_led_set_pin(recovery_yellow_led_gpios[i], 0);
+	for (i = 0; i < ctrl->port_count; i++) {
+		recovery_gpio_prepare_output(ctrl->green[i].gpio);
+		recovery_gpio_prepare_output(ctrl->yellow[i].gpio);
+		recovery_led_set_pin(&ctrl->green[i], 0);
+		recovery_led_set_pin(&ctrl->yellow[i], 0);
 	}
-
-	mdio_node = ofnode_path("/soc/switch@1fb58000/mdio");
-	if (!ofnode_valid(mdio_node))
-		return 0;
 
 	ret = uclass_get_device_by_ofnode(UCLASS_MDIO, mdio_node, &ctrl->mdio_dev);
 	if (ret)
@@ -1217,15 +1243,15 @@ static int recovery_led_phy_speed(struct recovery_led_ctrl *ctrl, int idx)
 {
 	int bmcr, bmsr, stat1000, ctrl1000, lpa;
 
-	if (!ctrl->mdio_dev || idx >= ARRAY_SIZE(recovery_led_phy_addrs))
+	if (!ctrl->mdio_dev || idx >= ctrl->port_count)
 		return 0;
 
-	bmsr = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
+	bmsr = dm_mdio_read(ctrl->mdio_dev, ctrl->phy_addr[idx],
 			    MDIO_DEVAD_NONE, MII_BMSR);
 	if (bmsr < 0)
 		return bmsr;
 
-	bmsr = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
+	bmsr = dm_mdio_read(ctrl->mdio_dev, ctrl->phy_addr[idx],
 			    MDIO_DEVAD_NONE, MII_BMSR);
 	if (bmsr < 0)
 		return bmsr;
@@ -1233,7 +1259,7 @@ static int recovery_led_phy_speed(struct recovery_led_ctrl *ctrl, int idx)
 	if (!(bmsr & BMSR_LSTATUS))
 		return 0;
 
-	bmcr = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
+	bmcr = dm_mdio_read(ctrl->mdio_dev, ctrl->phy_addr[idx],
 			    MDIO_DEVAD_NONE, MII_BMCR);
 	if (bmcr < 0)
 		return bmcr;
@@ -1247,9 +1273,9 @@ static int recovery_led_phy_speed(struct recovery_led_ctrl *ctrl, int idx)
 		return SPEED_10;
 	}
 
-	stat1000 = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
+	stat1000 = dm_mdio_read(ctrl->mdio_dev, ctrl->phy_addr[idx],
 				MDIO_DEVAD_NONE, MII_STAT1000);
-	ctrl1000 = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
+	ctrl1000 = dm_mdio_read(ctrl->mdio_dev, ctrl->phy_addr[idx],
 				MDIO_DEVAD_NONE, MII_CTRL1000);
 	if (stat1000 < 0 || ctrl1000 < 0)
 		return stat1000 < 0 ? stat1000 : ctrl1000;
@@ -1260,12 +1286,12 @@ static int recovery_led_phy_speed(struct recovery_led_ctrl *ctrl, int idx)
 			return SPEED_1000;
 	}
 
-	lpa = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
+	lpa = dm_mdio_read(ctrl->mdio_dev, ctrl->phy_addr[idx],
 			   MDIO_DEVAD_NONE, MII_ADVERTISE);
 	if (lpa < 0)
 		return lpa;
 
-	bmsr = dm_mdio_read(ctrl->mdio_dev, recovery_led_phy_addrs[idx],
+	bmsr = dm_mdio_read(ctrl->mdio_dev, ctrl->phy_addr[idx],
 			    MDIO_DEVAD_NONE, MII_LPA);
 	if (bmsr < 0)
 		return bmsr;
@@ -1299,7 +1325,7 @@ static void recovery_led_poll(struct recovery_led_ctrl *ctrl)
 
 	if (poll_phys) {
 		ctrl->last_phy_poll = now;
-		for (i = 0; i < RECOVERY_LED_PORTS; i++) {
+		for (i = 0; i < ctrl->port_count; i++) {
 			int speed = recovery_led_phy_speed(ctrl, i);
 
 			if (speed < 0) {
@@ -1311,7 +1337,7 @@ static void recovery_led_poll(struct recovery_led_ctrl *ctrl)
 			ctrl->speed[i] = speed;
 		}
 
-		if (i == RECOVERY_LED_PORTS)
+		if (i == ctrl->port_count)
 			ctrl->mdio_fault = false;
 	}
 
@@ -1320,10 +1346,10 @@ static void recovery_led_poll(struct recovery_led_ctrl *ctrl)
 	blink_on = !activity ||
 		   ((now / RECOVERY_LED_BLINK_MS) & 1);
 
-	for (i = 0; i < RECOVERY_LED_PORTS; i++) {
-		recovery_led_set_pin(recovery_green_led_gpios[i],
+	for (i = 0; i < ctrl->port_count; i++) {
+		recovery_led_set_pin(&ctrl->green[i],
 				     ctrl->speed[i] == SPEED_1000 && blink_on);
-		recovery_led_set_pin(recovery_yellow_led_gpios[i],
+		recovery_led_set_pin(&ctrl->yellow[i],
 				     (ctrl->speed[i] == SPEED_10 ||
 				      ctrl->speed[i] == SPEED_100) &&
 					     blink_on);
@@ -1712,8 +1738,52 @@ static int recovery_validate_uboot_slot_image(const void *image, size_t size)
 	    fit_magic != RECOVERY_FDT_MAGIC) {
 		printf("Invalid U-Boot slot image: magic[0]=0x%08x magic[0x%04x]=0x%08x\n",
 		       prefix_magic, RECOVERY_UBOOT_SLOT_FIT_OFFSET, fit_magic);
-		printf("Expected xr1710g-chainloader-slot.bin, not u-boot.bin or bare .itb\n");
+		printf("Expected a packaged chainloader slot image, not u-boot.bin or a bare .itb\n");
 		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int recovery_validate_firmware_image(const void *image, size_t size)
+{
+	const char *offset_env = env_get("recovery_firmware_fit_offset");
+	const u8 *fit;
+	ulong fit_offset;
+	u32 fit_size;
+	int ret;
+
+	/* Legacy UBI recovery images predate an explicit FIT offset contract. */
+	if (!offset_env)
+		return 0;
+
+	fit_offset = env_get_hex("recovery_firmware_fit_offset", ULONG_MAX);
+	if (fit_offset == ULONG_MAX || fit_offset > size ||
+	    size - fit_offset < sizeof(struct fdt_header)) {
+		printf("Firmware FIT offset 0x%lx is outside the %lu-byte upload\n",
+		       fit_offset, (unsigned long)size);
+		return -EINVAL;
+	}
+
+	fit = (const u8 *)image + fit_offset;
+	ret = fdt_check_header(fit);
+	if (ret) {
+		printf("Firmware has no valid FIT at offset 0x%lx: %d\n",
+		       fit_offset, ret);
+		return -ENOEXEC;
+	}
+
+	fit_size = fdt_totalsize(fit);
+	if (fit_size < sizeof(struct fdt_header) || fit_size > size - fit_offset) {
+		printf("Firmware FIT size 0x%x exceeds upload data after offset 0x%lx\n",
+		       fit_size, fit_offset);
+		return -EFBIG;
+	}
+
+	ret = fit_check_format(fit, fit_size);
+	if (ret) {
+		printf("Firmware FIT format validation failed: %d\n", ret);
+		return ret;
 	}
 
 	return 0;
@@ -2600,69 +2670,116 @@ static int recovery_open_custom_response(struct fs_file *file,
 	return 1;
 }
 
+static bool recovery_uses_raw_firmware_slot(void)
+{
+	const char *raw = env_get("recovery_dev");
+
+	return raw && *raw;
+}
+
+static const char *recovery_board_name(void)
+{
+	if (of_machine_is_compatible("axon,xg2010g") ||
+	    of_machine_is_compatible("econet,xg2010g"))
+		return "XG2010G";
+
+	if (of_machine_is_compatible("econet,xr1710g") ||
+	    of_machine_is_compatible("econet,xr1710g-ubi") ||
+	    of_machine_is_compatible("gemtek,xr1710g") ||
+	    of_machine_is_compatible("gemtek,xr1710g-ubi"))
+		return "XR1710G";
+
+	return "AN7581";
+}
+
+static int recovery_open_about_response(struct fs_file *file)
+{
+	char json[320];
+	bool raw_slot = recovery_uses_raw_firmware_slot();
+	const char *layout = raw_slot ? "raw-slot" :
+			     xr1710g_detect_ubi_version();
+	int json_len;
+
+#ifdef U_BOOT_DATE
+	json_len = snprintf(json, sizeof(json),
+			    "{\"u_boot\":\"%s (%s - %s %s)\","
+			    "\"board\":\"%s\",\"firmware_mode\":\"%s\","
+			    "\"detected_layout\":\"%s\"}\n",
+			    U_BOOT_VERSION, U_BOOT_DATE, U_BOOT_TIME, U_BOOT_TZ,
+			    recovery_board_name(), raw_slot ? "raw" : "ubi",
+			    layout);
+#else
+	json_len = snprintf(json, sizeof(json),
+			    "{\"u_boot\":\"%s\",\"board\":\"%s\","
+			    "\"firmware_mode\":\"%s\","
+			    "\"detected_layout\":\"%s\"}\n",
+			    U_BOOT_VERSION, recovery_board_name(),
+			    raw_slot ? "raw" : "ubi", layout);
+#endif
+	if (json_len < 0)
+		return 0;
+	if (json_len >= (int)sizeof(json))
+		json_len = (int)sizeof(json) - 1;
+
+	return recovery_open_custom_response(file, "application/json", json,
+					     json_len);
+}
+
 /* lwIP httpd custom file hooks: serve only dynamic endpoints; static files via fsdata */
 int fs_open_custom(struct fs_file *file, const char *name)
 {
-    const char *p;
-    if (!file || !name)
-        return 0;
+	const char *p;
 
-    /* Normalize leading slash to make httpd default filenames work */
-    p = name;
-    if (*p == '/')
-        p++;
+	if (!file || !name)
+		return 0;
 
+	/* Normalize leading slash to make httpd default filenames work */
+	p = name;
+	if (*p == '/')
+		p++;
 
-	    if (!strcmp(p, "status")) {
-        char json[256];
-        int ok = (prog_phase == 3);
-        int err = (prog_phase == -1);
-        int json_len = snprintf(json, sizeof(json),
-                                "{\"in_progress\":%d,\"done\":%u,\"total\":%u,\"erase_done\":%u,\"erase_total\":%u,\"write_done\":%u,\"write_total\":%u,\"ok\":%d,\"error\":%d,\"phase\":%d}\n",
-                                prog_phase > 0 && prog_phase < 3,
-                                (unsigned)prog_done, (unsigned)prog_total,
-                                (unsigned)prog_erase_done, (unsigned)prog_erase_total,
-                                (unsigned)prog_write_done, (unsigned)prog_write_total,
-                                ok, err, prog_phase);
-        if (json_len < 0)
-            return 0;
-        if (json_len >= (int)sizeof(json))
-            json_len = (int)sizeof(json) - 1;
+	if (!strcmp(p, "status")) {
+		char json[256];
+		int ok = prog_phase == 3;
+		int err = prog_phase == -1;
+		int json_len;
 
-        return recovery_open_custom_response(file, "application/json",
-					     json, json_len);
-	    }
-	    else if (!strcmp(p, "ok")) {
-	        file->data = recovery_page_ok;
-	        file->len = sizeof(recovery_page_ok) - 1;
-	        file->index = 0;
-	        file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
-	        return 1;
-	    }
-	    else if (!strcmp(p, "about")) {
-	        char json[256];
-	        int json_len =
-#ifdef U_BOOT_DATE
-	            snprintf(json, sizeof(json),
-	                     "{\"u_boot\":\"%s (%s - %s %s)\",\"detected_layout\":\"%s\"}\n",
-	                     U_BOOT_VERSION, U_BOOT_DATE, U_BOOT_TIME, U_BOOT_TZ,
-	                     xr1710g_detect_ubi_version());
-#else
-	            snprintf(json, sizeof(json),
-	                     "{\"u_boot\":\"%s\",\"detected_layout\":\"%s\"}\n",
-	                     U_BOOT_VERSION, xr1710g_detect_ubi_version());
-#endif
-        if (json_len < 0)
-            return 0;
-        if (json_len >= (int)sizeof(json))
-            json_len = (int)sizeof(json) - 1;
+		json_len = snprintf(json, sizeof(json),
+				    "{\"in_progress\":%d,\"done\":%u,"
+				    "\"total\":%u,\"erase_done\":%u,"
+				    "\"erase_total\":%u,\"write_done\":%u,"
+				    "\"write_total\":%u,\"ok\":%d,"
+				    "\"error\":%d,\"phase\":%d}\n",
+				    prog_phase > 0 && prog_phase < 3,
+				    (unsigned int)prog_done,
+				    (unsigned int)prog_total,
+				    (unsigned int)prog_erase_done,
+				    (unsigned int)prog_erase_total,
+				    (unsigned int)prog_write_done,
+				    (unsigned int)prog_write_total,
+				    ok, err, prog_phase);
+		if (json_len < 0)
+			return 0;
+		if (json_len >= (int)sizeof(json))
+			json_len = (int)sizeof(json) - 1;
 
-        return recovery_open_custom_response(file, "application/json",
-					     json, json_len);
-    }
-    /* Do not intercept favicon/index/ok/fail: served by fsdata */
-    /* let fsdata handle others */
-    return 0;
+		return recovery_open_custom_response(file, "application/json",
+						     json, json_len);
+	}
+
+	if (!strcmp(p, "ok")) {
+		file->data = recovery_page_ok;
+		file->len = sizeof(recovery_page_ok) - 1;
+		file->index = 0;
+		file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+		return 1;
+	}
+
+	if (!strcmp(p, "about"))
+		return recovery_open_about_response(file);
+
+	/* Static files are served by fsdata. */
+	return 0;
 }
 
 void fs_close_custom(struct fs_file *file)
@@ -2887,6 +3004,12 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 
 	if (current_target == TARGET_UBOOT) {
 		ret = recovery_validate_uboot_slot_image(image, image_size);
+		if (ret) {
+			prog_phase = -1;
+			return ret;
+		}
+	} else {
+		ret = recovery_validate_firmware_image(image, image_size);
 		if (ret) {
 			prog_phase = -1;
 			return ret;
