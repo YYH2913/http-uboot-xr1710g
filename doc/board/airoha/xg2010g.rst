@@ -23,57 +23,74 @@ this tree.
 Flash layout
 ------------
 
-The control device tree describes the stock layout exactly:
+The primary layout follows the XR1710G UBI design while retaining the XG2010G
+factory-data boundaries:
 
-================ ========== ==========
-Partition        Offset     Size
-================ ========== ==========
-bootloader       0x00000000 2 MiB
-uenv             0x00200000 2 MiB
-dsd              0x00400000 2 MiB
-tclinux          0x00600000 64 MiB
-tclinux_slave    0x04600000 64 MiB
-system           0x08600000 256 MiB
-rootfs_data      0x18600000 8 MiB
-reserved         0x18e00000 47 MiB
-art              0x1bd00000 3 MiB
-reserved_bmt     0x1c000000 64 MiB
-================ ========== ==========
+============ ========== ==========
+Partition    Offset     Size
+============ ========== ==========
+vendor       0x00000000 6 MiB
+chainloader  0x00600000 1 MiB
+ubi          0x00700000 438 MiB
+art          0x1bd00000 3 MiB
+reserved_bmt 0x1c000000 64 MiB
+============ ========== ==========
 
-Only the two firmware slots are writable from U-Boot. Bootloader data, DSD,
-system data, ART, the unknown gap before ART, and the final BMT/BBT area are
-read-only.
+``vendor`` contains the stock bootloader, environment and DSD areas. The
+``ubi`` partition ends at ``0x1bd00000``, one MiB earlier than the XR1710G 2.0
+layout, because XG2010G stores ART data there. Copying the XR1710G end address
+would overwrite part of ART.
 
-The complete 64 MiB ``tclinux_slave`` partition is available to HTTP recovery.
-This is larger than the FIT in the examined stock firmware and leaves room for
-larger vendor-slot images without extending into adjacent partitions.
+The original ``bootloader``, ``uenv``, ``dsd``, ``tclinux``,
+``tclinux_slave``, ``system``, ``rootfs_data_stock`` and ``reserved_stock``
+regions remain available as overlapping read-only compatibility views. They
+allow factory-data access and stock boot fallback before UBI is initialized.
+Only the primary ``ubi`` view is writable as firmware storage. ART and the
+final BMT/BBT area are always read-only.
 
 Boot and recovery
 -----------------
 
-The default boot command runs ``xg2010g_load`` on ``tclinux_slave``. The command
-skips bad NAND blocks, reads the FIT header at logical offset ``0x2100``, and
-loads only the FIT's declared total size before calling ``bootm``.
+The default boot path reads the ``fit`` volume from ``ubi`` and uses the same
+``config-1`` convention as XR1710G. If UBI is not formatted or does not contain
+a bootable image, U-Boot falls back to the stock ``tclinux_slave`` view. The
+stock loader skips bad NAND blocks, reads the FIT header at logical offset
+``0x2100``, and loads only the FIT's declared total size.
 
 Holding reset (GPIO 0, active low) during U-Boot startup enters HTTP recovery
-at ``http://192.168.255.1``. Firmware uploads must contain the complete vendor
-slot prefix and a structurally valid FIT at ``0x2100``. Recovery erases and
-rewrites only ``tclinux_slave``.
+at ``http://192.168.255.1``. Firmware recovery accepts an OpenWrt FIT image,
+recreates the fixed 438 MiB UBI layout, writes the image to ``ubi:fit`` and
+creates ``rootfs_data`` from the remaining space. The erase range is strictly
+``0x00700000..0x1bd00000``; DSD, ART and BMT/BBT data remain untouched.
 
-The U-Boot upload target is capped at the first 1 MiB of ``tclinux`` and accepts
-only a packaged chainloader slot image. Do not upload a bare FIT,
-``u-boot.bin``, or ``u-boot.img``.
+The U-Boot upload target is capped at the 1 MiB ``chainloader`` region starting
+at ``0x00600000`` and accepts only a packaged chainloader slot image. Do not
+upload a bare FIT, ``u-boot.bin``, or ``u-boot.img``.
 
 Factory data and environment
 ----------------------------
 
 LAN and WAN MAC addresses are read from the newline-separated key/value data
-at the start of ``dsd``. Other DSD fields are neither imported nor modified.
+at the start of the read-only ``dsd`` compatibility view. Other DSD fields are
+neither imported nor modified.
 
-Persistent U-Boot environment storage is deliberately disabled. The stock
-``uenv`` partition contains the vendor environment followed by second-stage
-loader data in every later eraseblock, so there is no verified empty block for
-``saveenv``. Compiled defaults are used on every boot.
+The stock ``uenv`` area remains read-only. Persistent U-Boot settings use the
+redundant ``ubootenv`` and ``ubootenv2`` UBI volumes, matching XR1710G. Before
+UBI is initialized, environment loading falls back to compiled defaults and
+``saveenv`` cannot overwrite the stock vendor environment.
+
+Ethernet
+--------
+
+U-Boot enables the AN7581 Ethernet block and ``gdm1`` switch path. Two external
+Clause 45 PHYs are described on the FE MDIO controller at addresses 5 and 8.
+Their active-low reset lines are GPIO 29 and GPIO 27 respectively, and the
+switch PHY polling window covers addresses 5 through 10.
+
+The topology is intentionally close to XR1710G, but XG2010G does not inherit
+XR1710G's PHY interrupt GPIOs, TX/RX pair-swap properties or per-port recovery
+LED mapping. Those are board-level electrical details and must be confirmed on
+real XG2010G hardware before enabling them.
 
 Hardware status
 ---------------

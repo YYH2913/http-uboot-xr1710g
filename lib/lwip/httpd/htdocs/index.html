@@ -427,6 +427,7 @@ button,input,select{font:inherit;letter-spacing:0}
 var activeTarget='firmware';
 var selectedLayout='2.0';
 var rawFirmware=false;
+var fixedUbiLayout=false;
 var selectedFile=null;
 var busy=false;
 var pollTimer=null;
@@ -477,7 +478,7 @@ function profile(){return profiles[activeTarget]}
 
 function updateLayout(){
   var layout=layouts[selectedLayout]||layouts['2.0'];
-  layoutBlock.hidden=activeTarget!=='firmware'||rawFirmware;
+  layoutBlock.hidden=activeTarget!=='firmware'||rawFirmware||fixedUbiLayout;
   layoutSelect.value=selectedLayout;
   layoutHelp.textContent=layout.help;
   layoutHelp.className='layout-help'+(layout.warning?' warning':'');
@@ -672,7 +673,7 @@ async function upload(){
     setBusy(false);
   });
 	  var uploadUri='/upload/'+activeTarget;
-	  if(activeTarget==='firmware'&&!rawFirmware)uploadUri+='?layout='+encodeURIComponent(selectedLayout);
+	  if(activeTarget==='firmware'&&!rawFirmware&&!fixedUbiLayout)uploadUri+='?layout='+encodeURIComponent(selectedLayout);
 	  xhr.open('POST',uploadUri,true);
   xhr.setRequestHeader('Content-Type','application/octet-stream');
   xhr.send(payload);
@@ -701,6 +702,13 @@ uploadButton.addEventListener('click',upload);
 	      document.getElementById('brand-name').textContent=data.board+' Recovery Mode';
 	      document.title=data.board+' Recovery Mode';
 	    }
+	    if(data&&data.board==='XG2010G'&&data.firmware_mode==='ubi'){
+	      fixedUbiLayout=true;
+	      layouts['2.0']={part:'ubi',size:'438 MiB',end:'0x1bd00000',help:'Fixed XG2010G layout preserving the external ART and BMT/BBT regions.'};
+	      profiles.firmware.preserve='DSD and ART factory data remain outside UBI; U-Boot environment uses redundant UBI volumes';
+	      profiles.firmware.notices=['Do not power off the device during recovery.','The fixed 438 MiB UBI partition is erased and rebuilt.','DSD, ART and the vendor BMT/BBT area are not modified.','The device restarts automatically when recovery completes.'];
+	      document.getElementById('detected-layout').textContent='438 MiB fixed UBI layout';
+	    }
 	    if(data&&data.firmware_mode==='raw'){
 	      rawFirmware=true;
 	      profiles.firmware={
@@ -719,7 +727,7 @@ uploadButton.addEventListener('click',upload);
 	      document.getElementById('version').textContent=data.u_boot;
 	      document.getElementById('footer-version').textContent=(data.board?data.board+' - ':'')+data.u_boot;
 	    }
-	    if(data&&data.detected_layout&&data.firmware_mode!=='raw'){
+	    if(data&&data.detected_layout&&data.firmware_mode!=='raw'&&!fixedUbiLayout){
 	      document.getElementById('detected-layout').textContent='UBI '+data.detected_layout;
 	    }
 	    setTarget(activeTarget);

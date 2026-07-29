@@ -24,7 +24,8 @@
 	};
 
 	chosen {
-		bootargs = "console=ttyS0,115200 earlycon";
+		rootdisk = <&ubi_rootfs>;
+		bootargs = "console=ttyS0,115200 earlycon ubi.block=0,fit root=/dev/fit0 rootwait";
 		stdout-path = "serial0:115200n8";
 		linux,usable-memory-range = <0x0 0x80200000 0x0 0x3fe00000>;
 	};
@@ -137,49 +138,47 @@
 		#size-cells = <1>;
 
 		partition@0 {
-			label = "bootloader";
-			reg = <0x00000000 0x00200000>;
-			read-only;
-		};
-
-		partition@200000 {
-			label = "uenv";
-			reg = <0x00200000 0x00200000>;
-			read-only;
-		};
-
-		partition@400000 {
-			label = "dsd";
-			reg = <0x00400000 0x00200000>;
+			label = "vendor";
+			reg = <0x00000000 0x00600000>;
 			read-only;
 		};
 
 		partition@600000 {
-			label = "tclinux";
-			reg = <0x00600000 0x04000000>;
-		};
-
-		partition@4600000 {
-			label = "tclinux_slave";
-			reg = <0x04600000 0x04000000>;
-		};
-
-		partition@8600000 {
-			label = "system";
-			reg = <0x08600000 0x10000000>;
+			label = "chainloader";
+			reg = <0x00600000 0x00100000>;
 			read-only;
 		};
 
-		partition@18600000 {
-			label = "rootfs_data";
-			reg = <0x18600000 0x00800000>;
-			read-only;
-		};
+		partition@700000 {
+			label = "ubi";
+			reg = <0x00700000 0x1b600000>;
+			compatible = "linux,ubi";
 
-		partition@18e00000 {
-			label = "reserved";
-			reg = <0x18e00000 0x02f00000>;
-			read-only;
+			volumes {
+				ubi-volume-ubootenv {
+					volname = "ubootenv";
+
+					nvmem-layout {
+						compatible = "u-boot,env-redundant-bool";
+					};
+				};
+
+				ubi-volume-ubootenv2 {
+					volname = "ubootenv2";
+
+					nvmem-layout {
+						compatible = "u-boot,env-redundant-bool";
+					};
+				};
+
+				ubi-volume-uboot {
+					volname = "uboot";
+				};
+
+				ubi_rootfs: ubi-volume-fit {
+					volname = "fit";
+				};
+			};
 		};
 
 		partition@1bd00000 {
@@ -191,6 +190,59 @@
 		partition@1c000000 {
 			label = "reserved_bmt";
 			reg = <0x1c000000 0x04000000>;
+			read-only;
+		};
+
+		/*
+		 * Read-only views of the stock XG2010G layout. These overlap the
+		 * XR-style primary layout above and exist only for factory-data access
+		 * and boot fallback before the UBI partition has been initialized.
+		 */
+		partition-stock-bootloader@0 {
+			label = "bootloader";
+			reg = <0x00000000 0x00200000>;
+			read-only;
+		};
+
+		partition-stock-uenv@200000 {
+			label = "uenv";
+			reg = <0x00200000 0x00200000>;
+			read-only;
+		};
+
+		partition-stock-dsd@400000 {
+			label = "dsd";
+			reg = <0x00400000 0x00200000>;
+			read-only;
+		};
+
+		partition-stock-tclinux@600000 {
+			label = "tclinux";
+			reg = <0x00600000 0x04000000>;
+			read-only;
+		};
+
+		partition-stock-tclinux-slave@4600000 {
+			label = "tclinux_slave";
+			reg = <0x04600000 0x04000000>;
+			read-only;
+		};
+
+		partition-stock-system@8600000 {
+			label = "system";
+			reg = <0x08600000 0x10000000>;
+			read-only;
+		};
+
+		partition-stock-rootfs-data@18600000 {
+			label = "rootfs_data_stock";
+			reg = <0x18600000 0x00800000>;
+			read-only;
+		};
+
+		partition-stock-reserved@18e00000 {
+			label = "reserved_stock";
+			reg = <0x18e00000 0x02f00000>;
 			read-only;
 		};
 	};
