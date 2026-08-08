@@ -43,6 +43,10 @@
 #define AIROHA_MAX_NUM_XSI_RSTS 6
 #define AIROHA_PEER_FPORT_CACHE_SIZE 8
 
+/* Software-only egress ids for the two GDM4 SerDes endpoints. */
+#define AIROHA_FPORT_GDM4_ETH 4
+#define AIROHA_FPORT_GDM4_USB 5
+
 #define AIROHA_MAX_PACKET_SIZE 2048
 #define AIROHA_RX_BUF_SIZE AIROHA_MAX_PACKET_SIZE
 #define AIROHA_NUM_TX_RING 8
@@ -697,6 +701,12 @@ struct airoha_eth {
 	void __iomem *eth_pcs_phya;
 	void __iomem *eth_pcs_xfi_ana;
 	void __iomem *eth_pcs_xfi_pma;
+	void __iomem *usb_pcs_xfi_mac;
+	void __iomem *usb_pcs_multi_sgmii;
+	void __iomem *usb_pcs_hsgmii_an;
+	void __iomem *usb_pcs_hsgmii_pcs;
+	void __iomem *usb_pcs_hsgmii_rate_adp;
+	void __iomem *usb_pcs_phya;
 
 	struct regmap *scu_regmap;
 	struct regmap *chip_scu_regmap;
@@ -705,20 +715,30 @@ struct airoha_eth {
 	struct reset_ctl_bulk rsts;
 	struct reset_ctl_bulk xsi_rsts;
 	struct reset_ctl_bulk *gdm4_pcs_rsts;
+	struct reset_ctl_bulk *gdm4_usb_pcs_rsts;
 	struct reset_ctl switch_rst;
 	bool has_switch_rst;
 	struct phy_device *gdm4_phy;
 	ofnode gdm4_phy_node;
+	struct phy_device *gdm4_usb_phy;
+	ofnode gdm4_usb_phy_node;
 	bool gdm4_usb_hsgmii;
+	bool gdm4_dual_hsgmii;
 	u8 gdm4_src_port;
 	u8 gdm4_tx_channel;
 	u8 gdm4_phy_addr;
 	u8 gdm4_fragment;
+	u8 gdm4_usb_src_port;
+	u8 gdm4_usb_tx_channel;
+	u8 gdm4_usb_phy_addr;
+	u8 gdm4_usb_fragment;
 	u8 default_tx_fport;
 	u8 last_tx_fport;
 	u8 last_rx_fport;
 	bool gdm4_pcs_ready;
 	bool gdm4_link_up;
+	bool gdm4_usb_pcs_ready;
+	bool gdm4_usb_link_up;
 	bool rtl8261_init_done;
 	bool rtl8261_phy5_pnswap_tx;
 	bool rtl8261_phy5_pnswap_rx;
@@ -956,6 +976,7 @@ static bool airoha_rtl8261_host_update_enabled(void);
 static int airoha_usxgmii_link_up(struct airoha_eth *eth);
 static int airoha_gdm4_pcs_link_up(struct airoha_eth *eth);
 static int airoha_gdm4_phy_link_up(struct airoha_eth *eth);
+static int airoha_gdm4_usb_phy_link_up(struct airoha_eth *eth);
 static int airoha_eth_gdm4_have_rx_signal(struct airoha_eth *eth);
 static bool airoha_qdma_ready(struct airoha_qdma *qdma);
 static int arht_eth_write_hwaddr(struct udevice *dev);
@@ -976,20 +997,33 @@ static void airoha_eth_gdm4_apply_runtime_phy_cfg(struct airoha_eth *eth);
 
 static u32 airoha_gdm4_fc_mask(struct airoha_eth *eth)
 {
+	u32 mask = 0;
 	u32 shift;
 
-	if (eth->gdm4_src_port < HSGMII_LAN_7581_ETH_SRCPORT ||
-	    eth->gdm4_src_port > HSGMII_LAN_7581_USB_SRCPORT)
-		return GENMASK(4, 0);
+	if (eth->gdm4_src_port >= HSGMII_LAN_7581_ETH_SRCPORT &&
+	    eth->gdm4_src_port <= HSGMII_LAN_7581_USB_SRCPORT) {
+		shift = (eth->gdm4_src_port - HSGMII_LAN_7581_ETH_SRCPORT) * 8;
+		mask |= GENMASK(4, 0) << shift;
+	}
 
-	shift = (eth->gdm4_src_port - HSGMII_LAN_7581_ETH_SRCPORT) * 8;
+	if (eth->gdm4_dual_hsgmii &&
+	    eth->gdm4_usb_src_port >= HSGMII_LAN_7581_ETH_SRCPORT &&
+	    eth->gdm4_usb_src_port <= HSGMII_LAN_7581_USB_SRCPORT) {
+		shift = (eth->gdm4_usb_src_port - HSGMII_LAN_7581_ETH_SRCPORT) * 8;
+		mask |= GENMASK(4, 0) << shift;
+	}
 
-	return GENMASK(4, 0) << shift;
+	return mask ? mask : GENMASK(4, 0);
 }
 
 static u32 airoha_gdm4_vip_mask(struct airoha_eth *eth)
 {
-	return BIT(eth->gdm4_src_port & 0x1f);
+	u32 mask = BIT(eth->gdm4_src_port & 0x1f);
+
+	if (eth->gdm4_dual_hsgmii)
+		mask |= BIT(eth->gdm4_usb_src_port & 0x1f);
+
+	return mask;
 }
 
 static bool airoha_is_external_phy_addr(struct airoha_eth *eth, int phy_addr)
@@ -997,7 +1031,8 @@ static bool airoha_is_external_phy_addr(struct airoha_eth *eth, int phy_addr)
 	if (airoha_rtl8261_is_phy_addr(phy_addr))
 		return true;
 
-	return eth->gdm4_usb_hsgmii && phy_addr >= 13 && phy_addr <= 15;
+	return (eth->gdm4_usb_hsgmii || eth->gdm4_dual_hsgmii) &&
+	       phy_addr >= 13 && phy_addr <= 15;
 }
 
 static void airoha_clrsetbits_le32(uintptr_t addr, u32 clear, u32 set)
@@ -1079,34 +1114,32 @@ static void __iomem *airoha_map_pcs_resource(ofnode node, const char *name)
 static int airoha_eth_gdm4_parse_config(struct udevice *dev,
 					struct airoha_eth *eth)
 {
-	ofnode gdm4_node, pcs_node, phy_node;
+	ofnode gdm4_node, pcs_node, phy_node, secondary_pcs, secondary_phy;
 	u32 phy_addr;
+	bool usb_primary = false;
 
 	eth->gdm4_src_port = HSGMII_LAN_7581_ETH_SRCPORT;
 	eth->gdm4_tx_channel = 0;
 	eth->gdm4_phy_addr = RTL8261_PHY5_ADDR;
 	eth->gdm4_fragment = 31;
 	eth->gdm4_phy_node = ofnode_null();
+	eth->gdm4_usb_src_port = HSGMII_LAN_7581_USB_SRCPORT;
+	eth->gdm4_usb_tx_channel = 12;
+	eth->gdm4_usb_fragment = 4;
+	eth->gdm4_usb_phy_addr = 13;
+	eth->gdm4_usb_phy_node = ofnode_null();
 
 	gdm4_node = ofnode_find_subnode(dev_ofnode(dev), "ethernet@4");
-	if (ofnode_valid(gdm4_node))
-		eth->gdm4_usb_hsgmii =
-			ofnode_read_bool(gdm4_node, "airoha,usb-hsgmii");
-
-	if (!eth->gdm4_usb_hsgmii) {
-		eth->eth_pcs_xfi_mac = map_sysmem(ETH_PCS_XFI_MAC_BASE, 0x1000);
-		eth->eth_pcs_multi_sgmii =
-			map_sysmem(ETH_PCS_MULTI_SGMII_BASE, 0x450);
-		eth->eth_pcs_usxgmii = map_sysmem(ETH_PCS_USXGMII_BASE, 0x338);
-		eth->eth_pcs_hsgmii_rate_adp =
-			map_sysmem(ETH_PCS_HSGMII_RATE_ADP_BASE, 0x300);
-		eth->eth_pcs_xfi_ana = map_sysmem(ETH_PCS_XFI_ANA_BASE, 0x1000);
-		eth->eth_pcs_xfi_pma = map_sysmem(ETH_PCS_XFI_PMA_BASE, 0x1000);
-		return 0;
-	}
-
 	if (!ofnode_valid(gdm4_node))
-		return -EINVAL;
+		goto map_eth_defaults;
+
+	usb_primary = ofnode_read_bool(gdm4_node, "airoha,usb-hsgmii");
+	secondary_pcs = ofnode_parse_phandle(gdm4_node, "secondary-pcs", 0);
+	eth->gdm4_dual_hsgmii = usb_primary && ofnode_valid(secondary_pcs);
+	eth->gdm4_usb_hsgmii = usb_primary && !eth->gdm4_dual_hsgmii;
+
+	if (!eth->gdm4_usb_hsgmii)
+		goto map_eth_primary;
 
 	eth->gdm4_src_port = ofnode_read_u32_default(gdm4_node,
 						     "airoha,source-port",
@@ -1124,6 +1157,54 @@ static int airoha_eth_gdm4_parse_config(struct udevice *dev,
 	pcs_node = ofnode_parse_phandle(gdm4_node, "pcs", 0);
 	if (!ofnode_valid(pcs_node))
 		return -EINVAL;
+
+	goto map_usb_primary;
+
+map_eth_defaults:
+	eth->eth_pcs_xfi_mac = map_sysmem(ETH_PCS_XFI_MAC_BASE, 0x1000);
+	eth->eth_pcs_multi_sgmii = map_sysmem(ETH_PCS_MULTI_SGMII_BASE, 0x450);
+	eth->eth_pcs_usxgmii = map_sysmem(ETH_PCS_USXGMII_BASE, 0x338);
+	eth->eth_pcs_hsgmii_rate_adp =
+		map_sysmem(ETH_PCS_HSGMII_RATE_ADP_BASE, 0x300);
+	eth->eth_pcs_xfi_ana = map_sysmem(ETH_PCS_XFI_ANA_BASE, 0x1000);
+	eth->eth_pcs_xfi_pma = map_sysmem(ETH_PCS_XFI_PMA_BASE, 0x1000);
+	return 0;
+
+map_eth_primary:
+	eth->gdm4_src_port = ofnode_read_u32_default(gdm4_node,
+						     "airoha,source-port",
+						     HSGMII_LAN_7581_ETH_SRCPORT);
+	eth->gdm4_tx_channel = ofnode_read_u32_default(gdm4_node,
+						       "airoha,tx-channel", 13);
+	eth->gdm4_fragment = 31;
+	phy_node = ofnode_parse_phandle(gdm4_node, "phy-handle", 0);
+	if (ofnode_valid(phy_node) &&
+	    !ofnode_read_u32(phy_node, "reg", &phy_addr)) {
+		eth->gdm4_phy_addr = phy_addr;
+		eth->gdm4_phy_node = phy_node;
+	}
+	pcs_node = ofnode_parse_phandle(gdm4_node, "pcs", 0);
+	if (!ofnode_valid(pcs_node))
+		goto map_eth_defaults;
+	eth->eth_pcs_xfi_mac = airoha_map_pcs_resource(pcs_node, "xfi_mac");
+	eth->eth_pcs_multi_sgmii =
+		airoha_map_pcs_resource(pcs_node, "multi_sgmii");
+	eth->eth_pcs_usxgmii = airoha_map_pcs_resource(pcs_node, "usxgmii");
+	eth->eth_pcs_hsgmii_rate_adp =
+		airoha_map_pcs_resource(pcs_node, "hsgmii_rate_adp");
+	eth->eth_pcs_xfi_ana = airoha_map_pcs_resource(pcs_node, "xfi_ana");
+	eth->eth_pcs_xfi_pma = airoha_map_pcs_resource(pcs_node, "xfi_pma");
+	if (!eth->eth_pcs_xfi_mac || !eth->eth_pcs_multi_sgmii ||
+	    !eth->eth_pcs_usxgmii || !eth->eth_pcs_hsgmii_rate_adp ||
+	    !eth->eth_pcs_xfi_ana || !eth->eth_pcs_xfi_pma)
+		return -ENOMEM;
+
+	if (!eth->gdm4_dual_hsgmii)
+		return 0;
+
+	goto map_usb_secondary;
+
+map_usb_primary:
 
 	eth->eth_pcs_xfi_mac = airoha_map_pcs_resource(pcs_node, "xsi_mac");
 	eth->eth_pcs_hsgmii_an = airoha_map_pcs_resource(pcs_node, "hsgmii_an");
@@ -1144,20 +1225,61 @@ static int airoha_eth_gdm4_parse_config(struct udevice *dev,
 		return PTR_ERR(eth->gdm4_pcs_rsts);
 
 	return 0;
+
+map_usb_secondary:
+	eth->gdm4_usb_src_port =
+		ofnode_read_u32_default(gdm4_node,
+					"airoha,secondary-source-port",
+					HSGMII_LAN_7581_USB_SRCPORT);
+	eth->gdm4_usb_tx_channel =
+		ofnode_read_u32_default(gdm4_node,
+					"airoha,secondary-tx-channel", 12);
+	secondary_phy = ofnode_parse_phandle(gdm4_node, "secondary-phy", 0);
+	if (!ofnode_valid(secondary_phy) ||
+	    ofnode_read_u32(secondary_phy, "reg", &phy_addr))
+		return -EINVAL;
+	eth->gdm4_usb_phy_addr = phy_addr;
+	eth->gdm4_usb_phy_node = secondary_phy;
+
+	eth->usb_pcs_xfi_mac = airoha_map_pcs_resource(secondary_pcs, "xsi_mac");
+	eth->usb_pcs_hsgmii_an =
+		airoha_map_pcs_resource(secondary_pcs, "hsgmii_an");
+	eth->usb_pcs_hsgmii_pcs =
+		airoha_map_pcs_resource(secondary_pcs, "hsgmii_pcs");
+	eth->usb_pcs_multi_sgmii =
+		airoha_map_pcs_resource(secondary_pcs, "multi_sgmii");
+	eth->usb_pcs_hsgmii_rate_adp =
+		airoha_map_pcs_resource(secondary_pcs, "hsgmii_rate_adp");
+	eth->usb_pcs_phya = airoha_map_pcs_resource(secondary_pcs, "phya");
+	if (!eth->usb_pcs_xfi_mac || !eth->usb_pcs_hsgmii_an ||
+	    !eth->usb_pcs_hsgmii_pcs || !eth->usb_pcs_multi_sgmii ||
+	    !eth->usb_pcs_hsgmii_rate_adp || !eth->usb_pcs_phya)
+		return -ENOMEM;
+
+	eth->gdm4_usb_pcs_rsts = devm_reset_bulk_get_by_node(dev, secondary_pcs);
+	if (IS_ERR(eth->gdm4_usb_pcs_rsts))
+		return PTR_ERR(eth->gdm4_usb_pcs_rsts);
+
+	return 0;
+}
+
+static void airoha_eth_pcs_pre_config_ep(void __iomem *xfi_mac)
+{
+	airoha_rmw(xfi_mac, PCS_XFI_GIB_CFG, 0,
+		   PCS_XFI_RXMPI_STOP | PCS_XFI_RXMBI_STOP |
+			   PCS_XFI_TXMPI_STOP | PCS_XFI_TXMBI_STOP);
+	airoha_rmw(xfi_mac, PCS_XFI_LOGIC_RST,
+		   PCS_XFI_MAC_LOGIC_RST, 0);
+	airoha_rmw(xfi_mac, PCS_XFI_LOGIC_RST, 0,
+		   PCS_XFI_MAC_LOGIC_RST);
+	udelay(1500);
+	airoha_rmw(xfi_mac, PCS_XFI_CNT_CLR, 0,
+		   PCS_XFI_GLB_CNT_CLR);
 }
 
 static void airoha_eth_pcs_pre_config(struct airoha_eth *eth)
 {
-	airoha_rmw(eth->eth_pcs_xfi_mac, PCS_XFI_GIB_CFG, 0,
-		   PCS_XFI_RXMPI_STOP | PCS_XFI_RXMBI_STOP |
-			   PCS_XFI_TXMPI_STOP | PCS_XFI_TXMBI_STOP);
-	airoha_rmw(eth->eth_pcs_xfi_mac, PCS_XFI_LOGIC_RST,
-		   PCS_XFI_MAC_LOGIC_RST, 0);
-	airoha_rmw(eth->eth_pcs_xfi_mac, PCS_XFI_LOGIC_RST, 0,
-		   PCS_XFI_MAC_LOGIC_RST);
-	udelay(1500);
-	airoha_rmw(eth->eth_pcs_xfi_mac, PCS_XFI_CNT_CLR, 0,
-		   PCS_XFI_GLB_CNT_CLR);
+	airoha_eth_pcs_pre_config_ep(eth->eth_pcs_xfi_mac);
 }
 
 static void airoha_eth_pcs_init_usxgmii(struct airoha_eth *eth)
@@ -1234,26 +1356,30 @@ static void airoha_eth_gdm4_restart_an(struct airoha_eth *eth)
 		   PCS_USXGMII_AN_RESTART, 0);
 }
 
-static void airoha_eth_pcs_post_config(struct airoha_eth *eth)
+static void airoha_eth_pcs_post_config_ep(void __iomem *xfi_mac, u8 fragment)
 {
-	airoha_rmw(eth->eth_pcs_xfi_mac, PCS_XFI_GIB_CFG, PCS_XFI_RX_FRAG_LEN,
-		   FIELD_PREP(PCS_XFI_RX_FRAG_LEN, eth->gdm4_fragment));
-	airoha_rmw(eth->eth_pcs_xfi_mac, PCS_XFI_GIB_CFG, PCS_XFI_TX_FRAG_LEN,
-		   FIELD_PREP(PCS_XFI_TX_FRAG_LEN, eth->gdm4_fragment));
-	airoha_rmw(eth->eth_pcs_xfi_mac, PCS_XFI_GIB_CFG, PCS_XFI_IPG_NUM,
+	airoha_rmw(xfi_mac, PCS_XFI_GIB_CFG, PCS_XFI_RX_FRAG_LEN,
+		   FIELD_PREP(PCS_XFI_RX_FRAG_LEN, fragment));
+	airoha_rmw(xfi_mac, PCS_XFI_GIB_CFG, PCS_XFI_TX_FRAG_LEN,
+		   FIELD_PREP(PCS_XFI_TX_FRAG_LEN, fragment));
+	airoha_rmw(xfi_mac, PCS_XFI_GIB_CFG, PCS_XFI_IPG_NUM,
 		   FIELD_PREP(PCS_XFI_IPG_NUM, 10));
-	airoha_rmw(eth->eth_pcs_xfi_mac, PCS_XFI_GIB_CFG, 0,
+	airoha_rmw(xfi_mac, PCS_XFI_GIB_CFG, 0,
 		   PCS_XFI_TX_FC_EN | PCS_XFI_RX_FC_EN);
-	airoha_rmw(eth->eth_pcs_xfi_mac, PCS_XFI_GIB_CFG,
+	airoha_rmw(xfi_mac, PCS_XFI_GIB_CFG,
 		   PCS_XFI_RXMPI_STOP | PCS_XFI_RXMBI_STOP |
 			   PCS_XFI_TXMPI_STOP | PCS_XFI_TXMBI_STOP,
 		   0);
 }
 
-static void airoha_eth_gdm4_usb_phya_init(struct airoha_eth *eth)
+static void airoha_eth_pcs_post_config(struct airoha_eth *eth)
 {
-	void __iomem *phya = eth->eth_pcs_phya;
+	airoha_eth_pcs_post_config_ep(eth->eth_pcs_xfi_mac,
+				      eth->gdm4_fragment);
+}
 
+static void airoha_eth_gdm4_usb_phya_init_ep(void __iomem *phya)
+{
 	airoha_rmw(phya, PCS_USB_MULTI_PHY_CDR_BIC,
 		   PCS_USB_MULTI_PHY_CDR_BIC_CFG,
 		   FIELD_PREP(PCS_USB_MULTI_PHY_CDR_BIC_CFG, 0xf3c));
@@ -1274,21 +1400,25 @@ static void airoha_eth_gdm4_usb_phya_init(struct airoha_eth *eth)
 			   FIELD_PREP(PCS_USB_MULTI_PHY_TPHY_SPEED, 1));
 }
 
-static void airoha_eth_gdm4_usb_hsgmii_init(struct airoha_eth *eth)
+static void airoha_usb_hsgmii_init(void __iomem *multi_sgmii,
+				   void __iomem *hsgmii_an,
+				   void __iomem *hsgmii_pcs,
+				   void __iomem *rate_adp,
+				   void __iomem *phya)
 {
 	u32 pcs_cfg;
 
 	/* USB0 Multi-SerDes is wired as a fixed-rate 2.5G HSGMII lane. */
-	airoha_rmw(eth->eth_pcs_multi_sgmii, PCS_MULTI_SGMII_MSG_RX_CTRL_0,
+	airoha_rmw(multi_sgmii, PCS_MULTI_SGMII_MSG_RX_CTRL_0,
 		   PCS_HSGMII_XFI_SEL, 0);
-	airoha_eth_gdm4_usb_phya_init(eth);
+	airoha_eth_gdm4_usb_phya_init_ep(phya);
 
 	pcs_cfg = PCS_HSGMII_PCS_AN_ENABLE |
 		  PCS_HSGMII_PCS_GMII_TXCLK_ENABLE |
 		  PCS_HSGMII_PCS_RX_CLK_ENABLE |
 		  FIELD_PREP(PCS_HSGMII_PCS_1US_TIMER, 0x9c) |
 		  PCS_HSGMII_PCS_SD_SIG_DET | PCS_HSGMII_PCS_ENABLE;
-	airoha_rmw(eth->eth_pcs_hsgmii_pcs, PCS_HSGMII_PCS_CTRL_1,
+	airoha_rmw(hsgmii_pcs, PCS_HSGMII_PCS_CTRL_1,
 		   PCS_HSGMII_PCS_AN_ENABLE |
 			   PCS_HSGMII_PCS_GMII_TXCLK_ENABLE |
 			   PCS_HSGMII_PCS_RX_CLK_ENABLE |
@@ -1297,7 +1427,7 @@ static void airoha_eth_gdm4_usb_hsgmii_init(struct airoha_eth *eth)
 			   PCS_HSGMII_PCS_ENABLE,
 		   pcs_cfg);
 
-	airoha_rmw(eth->eth_pcs_hsgmii_rate_adp,
+	airoha_rmw(rate_adp,
 		   PCS_HSGMII_RATE_ADAPT_CTRL_0,
 		   PCS_HSGMII_RATE_ADAPT_TX_EN |
 			   PCS_HSGMII_RATE_ADAPT_RX_EN |
@@ -1305,14 +1435,23 @@ static void airoha_eth_gdm4_usb_hsgmii_init(struct airoha_eth *eth)
 			   PCS_HSGMII_RATE_ADAPT_RX_BYPASS,
 		   PCS_HSGMII_RATE_ADAPT_TX_BYPASS |
 			   PCS_HSGMII_RATE_ADAPT_RX_BYPASS);
-	airoha_rmw(eth->eth_pcs_hsgmii_rate_adp,
+	airoha_rmw(rate_adp,
 		   PCS_HSGMII_RATE_ADAPT_CTRL_11,
 		   PCS_USB_HSGMII_RATE_FORCE_EN |
 			   PCS_USB_HSGMII_RATE_FORCE_MODE,
 		   0);
-	airoha_rmw(eth->eth_pcs_hsgmii_an, 0,
+	airoha_rmw(hsgmii_an, 0,
 		   PCS_USB_HSGMII_AN_ENABLE | PCS_USB_HSGMII_AN_RESET,
 		   PCS_USB_HSGMII_AN_RESET);
+}
+
+static void airoha_eth_gdm4_usb_hsgmii_init(struct airoha_eth *eth)
+{
+	airoha_usb_hsgmii_init(eth->eth_pcs_multi_sgmii,
+			       eth->eth_pcs_hsgmii_an,
+			       eth->eth_pcs_hsgmii_pcs,
+			       eth->eth_pcs_hsgmii_rate_adp,
+			       eth->eth_pcs_phya);
 }
 
 static void airoha_eth_gdm4_link_up_config(struct airoha_eth *eth)
@@ -1649,7 +1788,8 @@ static int airoha_eth_gdm4_pcs_init(struct airoha_eth *eth)
 {
 	int ret;
 
-	if (eth->gdm4_pcs_ready)
+	if (eth->gdm4_pcs_ready &&
+	    (!eth->gdm4_dual_hsgmii || eth->gdm4_usb_pcs_ready))
 		return 0;
 
 	if (eth->gdm4_usb_hsgmii) {
@@ -1671,23 +1811,48 @@ static int airoha_eth_gdm4_pcs_init(struct airoha_eth *eth)
 		airoha_eth_gdm4_usb_hsgmii_init(eth);
 		airoha_eth_pcs_post_config(eth);
 		eth->gdm4_pcs_ready = true;
+	} else if (!eth->gdm4_pcs_ready) {
+		if (!eth->eth_pcs_xfi_mac ||
+		    !eth->eth_pcs_multi_sgmii || !eth->eth_pcs_usxgmii ||
+		    !eth->eth_pcs_hsgmii_rate_adp || !eth->eth_pcs_xfi_ana ||
+		    !eth->eth_pcs_xfi_pma)
+			return 0;
 
-		return 0;
+		airoha_eth_pcs_pre_config(eth);
+		airoha_eth_gdm4_phya_init(eth);
+		airoha_eth_pcs_init_usxgmii(eth);
+		airoha_eth_pcs_interrupt_init_usxgmii(eth);
+		airoha_eth_pcs_post_config(eth);
+		airoha_eth_gdm4_restart_an(eth);
+		eth->gdm4_pcs_ready = true;
 	}
 
-	if (!eth->eth_pcs_xfi_mac ||
-	    !eth->eth_pcs_multi_sgmii || !eth->eth_pcs_usxgmii ||
-	    !eth->eth_pcs_hsgmii_rate_adp || !eth->eth_pcs_xfi_ana ||
-	    !eth->eth_pcs_xfi_pma)
+	if (!eth->gdm4_dual_hsgmii || eth->gdm4_usb_pcs_ready)
 		return 0;
 
-	airoha_eth_pcs_pre_config(eth);
-	airoha_eth_gdm4_phya_init(eth);
-	airoha_eth_pcs_init_usxgmii(eth);
-	airoha_eth_pcs_interrupt_init_usxgmii(eth);
-	airoha_eth_pcs_post_config(eth);
-	airoha_eth_gdm4_restart_an(eth);
-	eth->gdm4_pcs_ready = true;
+	if (!eth->usb_pcs_xfi_mac || !eth->usb_pcs_hsgmii_an ||
+	    !eth->usb_pcs_hsgmii_pcs || !eth->usb_pcs_multi_sgmii ||
+	    !eth->usb_pcs_hsgmii_rate_adp || !eth->usb_pcs_phya ||
+	    !eth->gdm4_usb_pcs_rsts)
+		return -ENODEV;
+
+	ret = reset_assert_bulk(eth->gdm4_usb_pcs_rsts);
+	if (ret)
+		return ret;
+	udelay(10);
+	ret = reset_deassert_bulk(eth->gdm4_usb_pcs_rsts);
+	if (ret)
+		return ret;
+
+	airoha_eth_pcs_pre_config_ep(eth->usb_pcs_xfi_mac);
+	airoha_usb_hsgmii_init(eth->usb_pcs_multi_sgmii,
+			       eth->usb_pcs_hsgmii_an,
+			       eth->usb_pcs_hsgmii_pcs,
+			       eth->usb_pcs_hsgmii_rate_adp,
+			       eth->usb_pcs_phya);
+	airoha_eth_pcs_post_config_ep(eth->usb_pcs_xfi_mac,
+				      eth->gdm4_usb_fragment);
+	eth->gdm4_usb_pcs_ready = true;
 
 	return 0;
 }
@@ -1878,22 +2043,34 @@ static void airoha_fe_crsn_qsel_init(struct airoha_eth *eth)
 				 CDM_CRSN_QSEL_Q0));
 }
 
-static bool airoha_recovery_port_is_gdm4(void)
+static bool airoha_recovery_port_is_gdm4(struct airoha_eth *eth)
 {
 	const char *port = env_get("recovery_port");
 
 	return port && (!strcmp(port, "4") || !strcmp(port, "10g") ||
 			!strcmp(port, "lan1") || !strcmp(port, "2.5g") ||
 			!strcmp(port, "2g5") || !strcmp(port, "2500") ||
-			!strcmp(port, "usb"));
+			!strcmp(port, "usb") ||
+			(eth->gdm4_dual_hsgmii && !strcmp(port, "lan3")));
 }
 
-static bool airoha_recovery_port_is_1g(void)
+static bool airoha_recovery_port_is_gdm4_usb(struct airoha_eth *eth)
+{
+	const char *port = env_get("recovery_port");
+
+	return port && (!strcmp(port, "2.5g") || !strcmp(port, "2g5") ||
+			!strcmp(port, "2500") || !strcmp(port, "usb") ||
+			(eth->gdm4_dual_hsgmii && !strcmp(port, "lan3")));
+}
+
+static bool airoha_recovery_port_is_1g(struct airoha_eth *eth)
 {
 	const char *port = env_get("recovery_port");
 
 	return port && (!strcmp(port, "1") || !strcmp(port, "1g") ||
-			!strcmp(port, "lan2") || !strcmp(port, "lan3"));
+			!strcmp(port, "lan4") ||
+			(!eth->gdm4_dual_hsgmii &&
+			 (!strcmp(port, "lan2") || !strcmp(port, "lan3"))));
 }
 
 static bool airoha_recovery_dual_service_enabled(void)
@@ -1904,10 +2081,22 @@ static bool airoha_recovery_dual_service_enabled(void)
 	       !strcmp(port, "both") || !strcmp(port, "dual");
 }
 
-static bool airoha_recovery_accept_gdm4_rx(void)
+static bool airoha_recovery_accept_gdm4_rx(struct airoha_eth *eth)
 {
-	return airoha_recovery_port_is_gdm4() ||
+	return airoha_recovery_port_is_gdm4(eth) ||
 	       airoha_recovery_dual_service_enabled();
+}
+
+static bool airoha_fport_is_gdm4(u8 fport)
+{
+	return fport == AIROHA_FPORT_GDM4_ETH ||
+	       fport == AIROHA_FPORT_GDM4_USB;
+}
+
+static bool airoha_sport_is_gdm4(struct airoha_eth *eth, u8 sport)
+{
+	return sport == eth->gdm4_src_port ||
+	       (eth->gdm4_dual_hsgmii && sport == eth->gdm4_usb_src_port);
 }
 
 static bool airoha_eth_is_broadcast_addr(const u8 *addr)
@@ -1930,7 +2119,10 @@ static bool airoha_eth_is_multicast_addr(const u8 *addr)
 static u8 airoha_rx_sport_to_fport(struct airoha_eth *eth, u8 sport)
 {
 	if (sport == eth->gdm4_src_port)
-		return 4;
+		return AIROHA_FPORT_GDM4_ETH;
+
+	if (eth->gdm4_dual_hsgmii && sport == eth->gdm4_usb_src_port)
+		return AIROHA_FPORT_GDM4_USB;
 
 	if (sport == 1 || sport == 2 || sport == 4)
 		return sport;
@@ -1951,10 +2143,8 @@ static u8 airoha_rx_sport_to_recovery_fport(struct airoha_eth *eth, u8 sport)
 	 * the user explicitly forced the 10G-only port.
 	 */
 	if (airoha_recovery_dual_service_enabled() ||
-	    airoha_recovery_port_is_1g())
+	    airoha_recovery_port_is_1g(eth))
 		return 1;
-
-	(void)eth;
 
 	return 0;
 }
@@ -2133,12 +2323,58 @@ static void airoha_gdm2_loopback_disable(struct airoha_eth *eth)
 	airoha_fe_clear(eth, REG_FE_IFC_PORT_EN, BIT(2));
 }
 
-static void airoha_gdm4_update_cpu_path(struct airoha_eth *eth)
+static void airoha_gdm4_program_src_cpu_path(struct airoha_eth *eth, u32 cport)
 {
 	u32 src_port = eth->gdm4_src_port;
-	u32 src_port_slot = src_port & SP_CPORT_DFT_MASK;
-	u32 src_port_mask = SP_CPORT_MASK(src_port_slot);
-	u32 fc_mask = airoha_gdm4_fc_mask(eth);
+	u32 slot = src_port & SP_CPORT_DFT_MASK;
+
+	airoha_fe_rmw(eth, REG_SP_DFT_CPORT(src_port >> 3),
+		      SP_CPORT_MASK(slot), cport << (slot << 2));
+
+	if (eth->gdm4_dual_hsgmii) {
+		src_port = eth->gdm4_usb_src_port;
+		slot = src_port & SP_CPORT_DFT_MASK;
+		airoha_fe_rmw(eth, REG_SP_DFT_CPORT(src_port >> 3),
+			      SP_CPORT_MASK(slot), cport << (slot << 2));
+	}
+}
+
+static void airoha_gdm4_program_wan_ports(struct airoha_eth *eth)
+{
+	u32 val = FIELD_PREP(WAN0_MASK, eth->gdm4_src_port);
+
+	if (eth->gdm4_dual_hsgmii) {
+		val |= WAN1_EN_MASK |
+		       FIELD_PREP(WAN1_MASK, eth->gdm4_usb_src_port);
+	}
+
+	airoha_fe_rmw(eth, REG_FE_WAN_PORT,
+		      WAN1_EN_MASK | WAN1_MASK | WAN0_MASK, val);
+}
+
+static void airoha_gdm4_program_fc_map(struct airoha_eth *eth)
+{
+	u32 mask = airoha_gdm4_fc_mask(eth);
+	u32 val = 0;
+	u32 shift;
+
+	if (eth->gdm4_src_port >= HSGMII_LAN_7581_ETH_SRCPORT &&
+	    eth->gdm4_src_port <= HSGMII_LAN_7581_USB_SRCPORT) {
+		shift = (eth->gdm4_src_port - HSGMII_LAN_7581_ETH_SRCPORT) * 8;
+		val |= 2 << shift;
+	}
+	if (eth->gdm4_dual_hsgmii &&
+	    eth->gdm4_usb_src_port >= HSGMII_LAN_7581_ETH_SRCPORT &&
+	    eth->gdm4_usb_src_port <= HSGMII_LAN_7581_USB_SRCPORT) {
+		shift = (eth->gdm4_usb_src_port - HSGMII_LAN_7581_ETH_SRCPORT) * 8;
+		val |= 2 << shift;
+	}
+
+	airoha_fe_rmw(eth, REG_SRC_PORT_FC_MAP6, mask, val);
+}
+
+static void airoha_gdm4_update_cpu_path(struct airoha_eth *eth)
+{
 	bool use_cdm2 = airoha_gdm4_use_cdm2(eth);
 	u32 sp_cport = use_cdm2 ? FE_PSE_PORT_CDM2 : FE_PSE_PORT_CDM1;
 	bool loopback = airoha_gdm4_loopback_enabled(eth);
@@ -2179,13 +2415,9 @@ static void airoha_gdm4_update_cpu_path(struct airoha_eth *eth)
 			      DFT_CPORT_MASK(FE_PSE_PORT_GDM4),
 			      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM4),
 					 sp_cport));
-		airoha_fe_rmw(eth, REG_FE_WAN_PORT,
-			      WAN1_EN_MASK | WAN1_MASK | WAN0_MASK,
-			      FIELD_PREP(WAN0_MASK, src_port));
-		airoha_fe_rmw(eth, REG_SP_DFT_CPORT(src_port >> 3), src_port_mask,
-			      FE_PSE_PORT_CDM2 << (src_port_slot << 2));
-		airoha_fe_rmw(eth, REG_SRC_PORT_FC_MAP6,
-			      fc_mask, field_prep(fc_mask, 2));
+		airoha_gdm4_program_wan_ports(eth);
+		airoha_gdm4_program_src_cpu_path(eth, FE_PSE_PORT_CDM2);
+		airoha_gdm4_program_fc_map(eth);
 		return;
 	}
 
@@ -2203,15 +2435,12 @@ static void airoha_gdm4_update_cpu_path(struct airoha_eth *eth)
 	airoha_fe_rmw(eth, REG_PPE_DFT_CPORT(1, FE_PSE_PORT_GDM4),
 		      DFT_CPORT_MASK(FE_PSE_PORT_GDM4),
 		      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM4), sp_cport));
-	airoha_fe_rmw(eth, REG_SP_DFT_CPORT(src_port >> 3), src_port_mask,
-		      sp_cport << (src_port_slot << 2));
+	airoha_gdm4_program_wan_ports(eth);
+	airoha_gdm4_program_src_cpu_path(eth, sp_cport);
 }
 
 static void airoha_fe_recovery_runtime_init(struct airoha_eth *eth)
 {
-	u32 src_port = eth->gdm4_src_port;
-	u32 fc_mask = airoha_gdm4_fc_mask(eth);
-
 	if (!eth->fe_regs)
 		return;
 
@@ -2274,11 +2503,8 @@ static void airoha_fe_recovery_runtime_init(struct airoha_eth *eth)
 		      FIELD_PREP(GDM4_SPORT_OFF2_MASK, 8) |
 			      FIELD_PREP(GDM4_SPORT_OFF1_MASK, 8) |
 			      FIELD_PREP(GDM4_SPORT_OFF0_MASK, 8));
-	airoha_fe_rmw(eth, REG_FE_WAN_PORT,
-		      WAN1_EN_MASK | WAN1_MASK | WAN0_MASK,
-		      FIELD_PREP(WAN0_MASK, src_port));
-	airoha_fe_rmw(eth, REG_SRC_PORT_FC_MAP6, fc_mask,
-		      field_prep(fc_mask, 2));
+	airoha_gdm4_program_wan_ports(eth);
+	airoha_gdm4_program_fc_map(eth);
 
 	airoha_set_xsi_eth_port(eth, true);
 	airoha_gdm4_update_cpu_path(eth);
@@ -2667,6 +2893,17 @@ static void airoha_eth_gdm4_set_frag_size(struct airoha_eth *eth, u16 speed)
 		      FIELD_PREP(GDMA4_SGMII0_TX_FRAG_SIZE, frag_size_tx));
 	airoha_fe_rmw(eth, REG_GDMA4_RMBI_FRAG, GDMA4_SGMII0_RX_FRAG_SIZE,
 		      FIELD_PREP(GDMA4_SGMII0_RX_FRAG_SIZE, frag_size_rx));
+}
+
+static void airoha_eth_gdm4_set_usb_frag_size(struct airoha_eth *eth)
+{
+	if (!eth->fe_regs || !eth->gdm4_dual_hsgmii)
+		return;
+
+	airoha_fe_rmw(eth, REG_GDMA4_TMBI_FRAG, GDMA4_SGMII1_TX_FRAG_SIZE,
+		      FIELD_PREP(GDMA4_SGMII1_TX_FRAG_SIZE, 2));
+	airoha_fe_rmw(eth, REG_GDMA4_RMBI_FRAG, GDMA4_SGMII1_RX_FRAG_SIZE,
+		      FIELD_PREP(GDMA4_SGMII1_RX_FRAG_SIZE, 1));
 }
 
 static void airoha_eth_gdm4_select_speed_mode(struct airoha_eth *eth)
@@ -3237,17 +3474,17 @@ static void airoha_eth_gdm4_sync_rtl8261(struct airoha_eth *eth)
 	if (!eth->rtl8261_init_done || !eth->mdio_dev)
 		return;
 
-	ret = airoha_rtl8261_serdes_mode_update(eth, RTL8261_PHY5_ADDR);
+	ret = airoha_rtl8261_serdes_mode_update(eth, eth->gdm4_phy_addr);
 	if (ret)
 		printf("rtl8261: phy%d serdes update failed: %d\n",
-		       RTL8261_PHY5_ADDR, ret);
+		       eth->gdm4_phy_addr, ret);
 
-	ret = airoha_rtl8261_apply_board_cfg(eth, RTL8261_PHY5_ADDR);
+	ret = airoha_rtl8261_apply_board_cfg(eth, eth->gdm4_phy_addr);
 	if (ret)
 		printf("rtl8261: phy%d board cfg failed: %d\n",
-		       RTL8261_PHY5_ADDR, ret);
+		       eth->gdm4_phy_addr, ret);
 
-	ret = airoha_rtl8261_link_state_get(eth, RTL8261_PHY5_ADDR, NULL, NULL,
+	ret = airoha_rtl8261_link_state_get(eth, eth->gdm4_phy_addr, NULL, NULL,
 					    &speed, NULL, NULL);
 	if (!ret)
 		airoha_eth_gdm4_set_frag_size(eth, speed);
@@ -3265,18 +3502,18 @@ static void airoha_eth_gdm4_apply_runtime_phy_cfg(struct airoha_eth *eth)
 	if (!eth->rtl8261_init_done || !eth->mdio_dev)
 		return;
 
-	ret = airoha_rtl8261_apply_board_cfg(eth, RTL8261_PHY5_ADDR);
+	ret = airoha_rtl8261_apply_board_cfg(eth, eth->gdm4_phy_addr);
 	if (ret)
 		printf("rtl8261: phy%d runtime board cfg failed: %d\n",
-		       RTL8261_PHY5_ADDR, ret);
+		       eth->gdm4_phy_addr, ret);
 
 	if (!airoha_rtl8261_host_update_enabled())
 		return;
 
-	ret = airoha_rtl8261_serdes_mode_update(eth, RTL8261_PHY5_ADDR);
+	ret = airoha_rtl8261_serdes_mode_update(eth, eth->gdm4_phy_addr);
 	if (ret)
 		printf("rtl8261: phy%d runtime serdes update failed: %d\n",
-		       RTL8261_PHY5_ADDR, ret);
+		       eth->gdm4_phy_addr, ret);
 }
 
 static void airoha_qdma_dump_rx_window(const char *tag, int qdma_id,
@@ -3320,51 +3557,54 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 	u32 sw_mfc = 0, sw_cfc = 0, sw_atc = 0;
 	u32 sw_pmcr1 = 0, sw_pmcr2 = 0, sw_pmcr6 = 0;
 	u32 sw_pcr1 = 0, sw_pcr2 = 0, sw_pcr6 = 0;
-	u32 phy5_serdes_cfg = 0;
+	u32 phy_serdes_cfg = 0;
 	u32 mode = PCS_USXGMII_MODE_10000;
 	u32 rate_adapt = PCS_HSGMII_FORCE_RATE_MODE_10000;
 	u16 speed = 0;
 	int an = -1, pma = -1, pcs = -1, phyxs = -1;
+	int phy_addr;
 	int pma_mgbt = -1, pma_pair = -1, pcs_br1 = -1, pcs_br2 = -1;
 	int an_mgbt_ctrl1 = -1, an_mgbt_stat1 = -1;
 	int phy9_ctrl = -1, phy9_stat = -1, phy10_ctrl = -1, phy10_stat = -1;
 
 	if (!eth)
 		return;
+	phy_addr = eth->gdm4_phy_addr;
 
 	if (eth->mdio_dev) {
-		airoha_rtl8261_link_state_get(eth, RTL8261_PHY5_ADDR, &link_up,
+		airoha_rtl8261_link_state_get(eth, phy_addr, &link_up,
 					      &full_duplex, &speed, &mode,
 					      &rate_adapt);
-		an = airoha_mdio_read_lstatus(eth, RTL8261_PHY5_ADDR, MDIO_MMD_AN,
+		an = airoha_mdio_read_lstatus(eth, phy_addr, MDIO_MMD_AN,
 					      MDIO_STAT1);
-		pma = airoha_mdio_read_lstatus(eth, RTL8261_PHY5_ADDR,
+		pma = airoha_mdio_read_lstatus(eth, phy_addr,
 					       MDIO_MMD_PMAPMD, MDIO_STAT1);
-		pcs = airoha_mdio_read_lstatus(eth, RTL8261_PHY5_ADDR, MDIO_MMD_PCS,
+		pcs = airoha_mdio_read_lstatus(eth, phy_addr, MDIO_MMD_PCS,
 					       MDIO_STAT1);
-		phyxs = airoha_mdio_read_lstatus(eth, RTL8261_PHY5_ADDR,
+		phyxs = airoha_mdio_read_lstatus(eth, phy_addr,
 						 MDIO_MMD_PHYXS, MDIO_STAT1);
-		pma_mgbt = airoha_mdio_c45_read(eth, RTL8261_PHY5_ADDR,
+		pma_mgbt = airoha_mdio_c45_read(eth, phy_addr,
 						MDIO_MMD_PMAPMD,
 						RTL8261_PMA_MGBT_STATUS);
-		pma_pair = airoha_mdio_c45_read(eth, RTL8261_PHY5_ADDR,
+		pma_pair = airoha_mdio_c45_read(eth, phy_addr,
 						MDIO_MMD_PMAPMD,
 						RTL8261_PMA_MGBT_PAIR_SWAP);
-		pcs_br1 = airoha_mdio_c45_read(eth, RTL8261_PHY5_ADDR,
+		pcs_br1 = airoha_mdio_c45_read(eth, phy_addr,
 					       MDIO_MMD_PCS,
 					       RTL8261_PCS_BASE_R_STATUS1);
-		pcs_br2 = airoha_mdio_c45_read(eth, RTL8261_PHY5_ADDR,
+		pcs_br2 = airoha_mdio_c45_read(eth, phy_addr,
 					       MDIO_MMD_PCS,
 					       RTL8261_PCS_BASE_R_STATUS2);
-		an_mgbt_ctrl1 = airoha_mdio_c45_read(eth, RTL8261_PHY5_ADDR,
+		an_mgbt_ctrl1 = airoha_mdio_c45_read(eth, phy_addr,
 						     MDIO_MMD_AN,
 						     RTL8261_AN_MGBT_CTRL1);
-		an_mgbt_stat1 = airoha_mdio_c45_read(eth, RTL8261_PHY5_ADDR,
+		an_mgbt_stat1 = airoha_mdio_c45_read(eth, phy_addr,
 						     MDIO_MMD_AN,
 						     RTL8261_AN_MGBT_STATUS1);
-		phy5_serdes_cfg = airoha_mdio_c45_read(eth, RTL8261_PHY5_ADDR,
-						       RTL8261_MMD_VEND1,
-						       RTL8261_SERDES_GLOBAL_CFG);
+		phy_serdes_cfg = airoha_mdio_c45_read(eth,
+						      phy_addr,
+						      RTL8261_MMD_VEND1,
+						      RTL8261_SERDES_GLOBAL_CFG);
 	}
 
 	if (eth->eth_pcs_usxgmii) {
@@ -3479,9 +3719,10 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 		qdma1_desc_msg1 = le32_to_cpu(READ_ONCE(desc->msg1));
 	}
 
-	printf("rtl8261: %s phy5 link=%d duplex=%s c1=%04x a434=%04x speed=%s mask=%03x mode=%s rate=%s mdio[an=%04x pma=%04x pcs=%04x phyxs=%04x] pcs[4=%08x 30=%08x 310=%08x 318=%08x] sigdet=%d pcslink=%d usx=%d freqdet=%08x fbck=%d\n",
-	       tag ? tag : "diag", link_up, full_duplex ? "full" : "half",
-	       phy5_serdes_cfg, speed, airoha_rtl8261_speed_name(speed),
+	printf("rtl8261: %s phy%d link=%d duplex=%s c1=%04x a434=%04x speed=%s mask=%03x mode=%s rate=%s mdio[an=%04x pma=%04x pcs=%04x phyxs=%04x] pcs[4=%08x 30=%08x 310=%08x 318=%08x] sigdet=%d pcslink=%d usx=%d freqdet=%08x fbck=%d\n",
+	       tag ? tag : "diag", phy_addr, link_up,
+	       full_duplex ? "full" : "half", phy_serdes_cfg, speed,
+	       airoha_rtl8261_speed_name(speed),
 	       speed & RTL8261_PHY_SPEED_MASK,
 	       airoha_usxgmii_mode_name(mode),
 	       airoha_rate_mode_name(rate_adapt), an, pma, pcs, phyxs,
@@ -4139,6 +4380,8 @@ static int airoha_mdio_link_up(struct airoha_eth *eth, int addr)
 		return 0;
 	if (eth->gdm4_usb_hsgmii && addr == eth->gdm4_phy_addr)
 		return airoha_gdm4_phy_link_up(eth);
+	if (eth->gdm4_dual_hsgmii && addr == eth->gdm4_usb_phy_addr)
+		return airoha_gdm4_usb_phy_link_up(eth);
 
 	if (airoha_rtl8261_is_phy_addr(addr)) {
 		bool link_up;
@@ -4171,6 +4414,29 @@ static int airoha_gdm4_phy_link_up(struct airoha_eth *eth)
 		return 0;
 
 	return eth->gdm4_phy->link;
+}
+
+static int airoha_gdm4_usb_phy_link_up(struct airoha_eth *eth)
+{
+	if (!eth->gdm4_dual_hsgmii || !eth->gdm4_usb_phy)
+		return 0;
+
+	if (phy_startup(eth->gdm4_usb_phy))
+		return 0;
+
+	return eth->gdm4_usb_phy->link;
+}
+
+static int airoha_gdm4_usb_pcs_link_up(struct airoha_eth *eth)
+{
+	u32 status;
+
+	if (!eth->gdm4_dual_hsgmii || !eth->usb_pcs_hsgmii_pcs)
+		return 0;
+
+	status = airoha_rr(eth->usb_pcs_hsgmii_pcs, PCS_HSGMII_STATUS);
+
+	return !!(status & PCS_HSGMII_RX_SYNC);
 }
 
 static int airoha_usxgmii_link_up(struct airoha_eth *eth)
@@ -4272,14 +4538,12 @@ static int airoha_eth_gdm4_rxlock_workaround(struct airoha_eth *eth)
 static int airoha_forced_tx_fport(struct airoha_eth *eth)
 {
 	const char *port;
-	bool need_gdm4_bringup;
 
 	port = env_get("recovery_port");
 	if (!port || !*port || !strcmp(port, "auto"))
 		return 0;
 
-	if (!strcmp(port, "1") || !strcmp(port, "1g") ||
-	    !strcmp(port, "lan2") || !strcmp(port, "lan3")) {
+	if (airoha_recovery_port_is_1g(eth)) {
 		eth->gdm4_link_up = false;
 		return 1;
 	}
@@ -4289,31 +4553,13 @@ static int airoha_forced_tx_fport(struct airoha_eth *eth)
 		return 2;
 	}
 
-	if (airoha_recovery_port_is_gdm4()) {
-		if (eth->gdm4_usb_hsgmii) {
-			airoha_gdm4_ensure_ready(eth);
-			return 4;
-		}
+	if (airoha_recovery_port_is_gdm4(eth)) {
+		airoha_gdm4_ensure_ready(eth);
+		if (eth->gdm4_dual_hsgmii &&
+		    airoha_recovery_port_is_gdm4_usb(eth))
+			return AIROHA_FPORT_GDM4_USB;
 
-		airoha_eth_gdm4_apply_runtime_phy_cfg(eth);
-		need_gdm4_bringup = eth->last_tx_fport != 4;
-
-		/*
-		 * Do not restart in-band autonegotiation before every packet.
-		 * On XR1710G that keeps retraining the external serdes link and
-		 * can drop the very ARP/ICMP frames we are trying to emit.
-		 * Only run the heavy bring-up path when link is not already up.
-		 */
-		if (need_gdm4_bringup || !eth->gdm4_link_up ||
-		    !airoha_usxgmii_link_up(eth) ||
-		    !airoha_eth_gdm4_have_rx_signal(eth)) {
-			airoha_eth_gdm4_sync_rtl8261(eth);
-			airoha_eth_gdm4_restart_an(eth);
-			airoha_eth_gdm4_rxlock_workaround(eth);
-			airoha_eth_gdm4_link_up_config(eth);
-			eth->gdm4_link_up = true;
-		}
-		return 4;
+		return AIROHA_FPORT_GDM4_ETH;
 	}
 
 	return 0;
@@ -4337,14 +4583,21 @@ static bool airoha_recovery_wan_up(struct airoha_eth *eth)
 
 static bool airoha_recovery_gdm4_candidate(struct airoha_eth *eth)
 {
+	bool primary;
+
 	if (eth->gdm4_usb_hsgmii)
 		return airoha_gdm4_pcs_link_up(eth) &&
 		       airoha_gdm4_phy_link_up(eth);
 
-	return (airoha_gdm4_pcs_link_up(eth) &&
-		airoha_eth_gdm4_have_rx_signal(eth)) ||
-	       airoha_usxgmii_link_up(eth) ||
-	       airoha_mdio_link_up(eth, eth->gdm4_phy_addr);
+	primary = (airoha_gdm4_pcs_link_up(eth) &&
+		   airoha_eth_gdm4_have_rx_signal(eth)) ||
+		  airoha_usxgmii_link_up(eth) ||
+		  airoha_mdio_link_up(eth, eth->gdm4_phy_addr);
+
+	return primary ||
+	       (eth->gdm4_dual_hsgmii &&
+		airoha_gdm4_usb_pcs_link_up(eth) &&
+		airoha_gdm4_usb_phy_link_up(eth));
 }
 
 static void airoha_gdm4_ensure_ready(struct airoha_eth *eth)
@@ -4366,16 +4619,25 @@ static void airoha_gdm4_ensure_ready(struct airoha_eth *eth)
 		airoha_eth_gdm4_link_up_config(eth);
 		eth->gdm4_link_up = true;
 	}
+
+	if (eth->gdm4_dual_hsgmii)
+		eth->gdm4_usb_link_up = airoha_gdm4_usb_pcs_link_up(eth) &&
+					    airoha_gdm4_usb_phy_link_up(eth);
 }
 
 static void airoha_gdm4_recovery_prime(struct airoha_eth *eth)
 {
-	if (!airoha_recovery_accept_gdm4_rx())
+	if (!airoha_recovery_accept_gdm4_rx(eth))
 		return;
 
-	if (airoha_recovery_port_is_gdm4()) {
+	if (airoha_recovery_port_is_gdm4(eth)) {
+		u8 fport;
+
 		airoha_gdm4_ensure_ready(eth);
-		airoha_recovery_set_default_fport(eth, 4);
+		fport = eth->gdm4_dual_hsgmii &&
+			 airoha_recovery_port_is_gdm4_usb(eth) ?
+			 AIROHA_FPORT_GDM4_USB : AIROHA_FPORT_GDM4_ETH;
+		airoha_recovery_set_default_fport(eth, fport);
 	} else if (airoha_recovery_dual_service_enabled()) {
 		airoha_recovery_set_default_fport(eth, 1);
 		if (airoha_recovery_gdm4_candidate(eth))
@@ -4421,10 +4683,10 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 		return 1;
 	}
 
-	if (eth->default_tx_fport == 4 && gdm4_candidate) {
+	if (airoha_fport_is_gdm4(eth->default_tx_fport) && gdm4_candidate) {
 		if (!dual_service)
 			airoha_gdm4_ensure_ready(eth);
-		return 4;
+		return eth->default_tx_fport;
 	}
 
 	if (eth->default_tx_fport == 2 && wan_up) {
@@ -4447,8 +4709,8 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 	if (gdm4_candidate) {
 		if (!dual_service)
 			airoha_gdm4_ensure_ready(eth);
-		airoha_recovery_set_default_fport(eth, 4);
-		return 4;
+		airoha_recovery_set_default_fport(eth, AIROHA_FPORT_GDM4_ETH);
+		return AIROHA_FPORT_GDM4_ETH;
 	}
 
 	eth->gdm4_link_up = false;
@@ -4458,7 +4720,8 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 		return 2;
 	}
 
-	if (eth->default_tx_fport == 2 || eth->default_tx_fport == 4)
+	if (eth->default_tx_fport == 2 ||
+	    airoha_fport_is_gdm4(eth->default_tx_fport))
 		return eth->default_tx_fport;
 
 	airoha_recovery_set_default_fport(eth, 1);
@@ -4472,7 +4735,7 @@ static u8 airoha_encode_tx_fport(u8 fport)
 	 * GDM2 loopback remains part of the RX topology, but TX should not
 	 * depend on an environment-controlled comparison path.
 	 */
-	if (fport == 4)
+	if (airoha_fport_is_gdm4(fport))
 		return FE_PSE_PORT_GDM4;
 
 	return fport;
@@ -4594,8 +4857,6 @@ static void airoha_fe_pse_ports_init(struct airoha_eth *eth)
 
 static int airoha_fe_init(struct airoha_eth *eth)
 {
-	u32 src_port, fc_mask;
-
 	airoha_fe_maccr_init(eth);
 
 	airoha_fe_rmw(eth, REG_PSE_IQ_REV1, PSE_IQ_RES1_P2_MASK,
@@ -4671,14 +4932,9 @@ static int airoha_fe_init(struct airoha_eth *eth)
 			      FIELD_PREP(GDM4_SPORT_OFF1_MASK, 8) |
 			      FIELD_PREP(GDM4_SPORT_OFF0_MASK, 8));
 
-	/* Route the board-selected GDM4 SerDes source port into recovery. */
-	src_port = eth->gdm4_src_port;
-	fc_mask = airoha_gdm4_fc_mask(eth);
-	airoha_fe_rmw(eth, REG_FE_WAN_PORT,
-		      WAN1_EN_MASK | WAN1_MASK | WAN0_MASK,
-		      FIELD_PREP(WAN0_MASK, src_port));
-	airoha_fe_rmw(eth, REG_SRC_PORT_FC_MAP6, fc_mask,
-		      field_prep(fc_mask, 2));
+	/* Route every board-selected GDM4 SerDes source into recovery. */
+	airoha_gdm4_program_wan_ports(eth);
+	airoha_gdm4_program_fc_map(eth);
 	airoha_set_xsi_eth_port(eth, true);
 	airoha_gdm4_update_cpu_path(eth);
 
@@ -5200,6 +5456,7 @@ static void airoha_recovery_runtime_reset(struct airoha_eth *eth)
 	eth->last_tx_fport = 0;
 	eth->last_rx_fport = 0;
 	eth->gdm4_link_up = false;
+	eth->gdm4_usb_link_up = false;
 	eth->last_rx_valid = false;
 	eth->last_rx_qdma = 0;
 	eth->last_rx_sport = 0;
@@ -5274,7 +5531,7 @@ static struct airoha_qdma *airoha_active_tx_qdma(struct airoha_eth *eth, u8 fpor
 	 * topology. Keep 1G switch traffic on QDMA0 even when GDM4 loopback is
 	 * enabled, otherwise 1G replies can be queued onto the wrong DMA block.
 	 */
-	if (fport == 4 && airoha_gdm4_use_cdm2(eth)) {
+	if (airoha_fport_is_gdm4(fport) && airoha_gdm4_use_cdm2(eth)) {
 		struct airoha_qdma *qdma1 = &eth->qdma[1];
 
 		if (airoha_qdma_ready(qdma1))
@@ -5292,7 +5549,9 @@ static u32 airoha_recovery_tx_msg0(struct airoha_eth *eth, int qid, u8 fport)
 	 * Keep descriptor metadata aligned with the actual TX ring, matching the
 	 * Linux driver layout used by the GDM4 netdev.
 	 */
-	if (fport == 4)
+	if (fport == AIROHA_FPORT_GDM4_USB && eth->gdm4_dual_hsgmii)
+		channel = eth->gdm4_usb_tx_channel;
+	else if (fport == AIROHA_FPORT_GDM4_ETH)
 		channel = eth->gdm4_tx_channel;
 
 	return FIELD_PREP(QDMA_ETH_TXMSG_CHAN_MASK, channel) |
@@ -5326,10 +5585,12 @@ static int airoha_hw_init(struct udevice *dev, struct airoha_eth *eth)
 	if (ret)
 		return ret;
 
-	if (eth->gdm4_usb_hsgmii && eth->chip_scu_regmap) {
+	if ((eth->gdm4_usb_hsgmii || eth->gdm4_dual_hsgmii) &&
+	    eth->chip_scu_regmap)
 		regmap_update_bits(eth->chip_scu_regmap, SCU_SSR3,
 				   SCU_USB0_SERDES_SEL, 0);
-	} else if (eth->scu_regmap) {
+
+	if (!eth->gdm4_usb_hsgmii && eth->scu_regmap) {
 		regmap_update_bits(eth->scu_regmap, SCU_SSR3, SCU_ETH_XSI_SEL,
 				   SCU_ETH_XSI_USXGMII);
 		regmap_update_bits(eth->scu_regmap, SCU_WAN_CONF, SCU_WAN_SEL,
@@ -5363,6 +5624,8 @@ static int airoha_hw_init(struct udevice *dev, struct airoha_eth *eth)
 		return ret;
 	if (eth->gdm4_usb_hsgmii)
 		airoha_eth_gdm4_set_frag_size(eth, RTL8261_PHY_SPEED_2500M);
+	else if (eth->gdm4_dual_hsgmii)
+		airoha_eth_gdm4_set_usb_frag_size(eth);
 
 	for (i = 0; i < ARRAY_SIZE(eth->qdma); i++) {
 		ret = airoha_qdma_init(dev, eth, &eth->qdma[i]);
@@ -5476,6 +5739,27 @@ static int airoha_switch_init(struct udevice *dev, struct airoha_eth *eth)
 			return ret;
 	} else {
 		airoha_rtl8261_minimal_init(eth);
+	}
+
+	if (eth->gdm4_dual_hsgmii) {
+		if (!eth->mdio_dev)
+			return -ENODEV;
+
+		eth->gdm4_usb_phy =
+			dm_mdio_phy_connect(eth->mdio_dev,
+					    eth->gdm4_usb_phy_addr, dev,
+					    PHY_INTERFACE_MODE_2500BASEX);
+		if (!eth->gdm4_usb_phy)
+			return -ENODEV;
+
+		eth->gdm4_usb_phy->node = eth->gdm4_usb_phy_node;
+		ret = phy_config(eth->gdm4_usb_phy);
+		if (ret)
+			return ret;
+
+		ret = phy_startup(eth->gdm4_usb_phy);
+		if (ret)
+			return ret;
 	}
 
 	return 0;
@@ -5728,6 +6012,8 @@ static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 	msg1 = FIELD_PREP(QDMA_ETH_TXMSG_FPORT_MASK,
 			  eth->last_tx_hw_fport) |
 	       FIELD_PREP(QDMA_ETH_TXMSG_METER_MASK, 0x7f);
+	if (fport == AIROHA_FPORT_GDM4_USB && eth->gdm4_dual_hsgmii)
+		msg1 |= FIELD_PREP(QDMA_ETH_TXMSG_NBOQ_MASK, 1);
 
 	val = FIELD_PREP(QDMA_DESC_LEN_MASK, tx_length);
 	WRITE_ONCE(desc->ctrl, cpu_to_le32(val));
@@ -5773,10 +6059,10 @@ static u8 airoha_pick_packet_tx_fport(struct airoha_eth *eth,
 		return 0;
 
 	fport = airoha_peer_fport_lookup(eth, packet);
-	if (fport == 4) {
-		if (airoha_recovery_accept_gdm4_rx()) {
+	if (airoha_fport_is_gdm4(fport)) {
+		if (airoha_recovery_accept_gdm4_rx(eth)) {
 			airoha_gdm4_ensure_ready(eth);
-			return 4;
+			return fport;
 		}
 		fport = 0;
 	}
@@ -5791,7 +6077,7 @@ static int airoha_eth_send(struct udevice *dev, void *packet, int length)
 {
 	struct airoha_eth *eth = dev_get_priv(dev);
 	bool dual_service = airoha_recovery_dual_service_enabled();
-	bool send_lan = false, send_10g = false;
+	bool send_lan = false, send_gdm4 = false;
 	int attempts = 0, successes = 0;
 	int first_err = -EAGAIN;
 	u8 fport;
@@ -5811,8 +6097,8 @@ static int airoha_eth_send(struct udevice *dev, void *packet, int length)
 		 * the GDM4/USXGMII link status can lag behind usable RX.
 		 */
 		send_lan = true;
-		send_10g = airoha_recovery_accept_gdm4_rx();
-		if (send_10g && airoha_recovery_gdm4_candidate(eth))
+		send_gdm4 = airoha_recovery_accept_gdm4_rx(eth);
+		if (send_gdm4 && airoha_recovery_gdm4_candidate(eth))
 			airoha_gdm4_ensure_ready(eth);
 
 		if (send_lan) {
@@ -5824,9 +6110,22 @@ static int airoha_eth_send(struct udevice *dev, void *packet, int length)
 				first_err = ret;
 		}
 
-		if (send_10g) {
+		if (send_gdm4) {
 			attempts++;
-			ret = airoha_eth_send_on_fport(dev, packet, length, 4);
+			ret = airoha_eth_send_on_fport(dev,
+						       packet, length,
+						       AIROHA_FPORT_GDM4_ETH);
+			if (!ret)
+				successes++;
+			else if (first_err == -EAGAIN)
+				first_err = ret;
+		}
+
+		if (send_gdm4 && eth->gdm4_dual_hsgmii) {
+			attempts++;
+			ret = airoha_eth_send_on_fport(dev,
+						       packet, length,
+						       AIROHA_FPORT_GDM4_USB);
 			if (!ret)
 				successes++;
 			else if (first_err == -EAGAIN)
@@ -5960,8 +6259,8 @@ static int airoha_eth_recv_qdma(struct airoha_eth *eth, struct airoha_qdma *qdma
 	 * of dropping them unconditionally in U-Boot.
 	 */
 	if ((desc_ctrl & QDMA_DESC_DROP_MASK) &&
-	    !(airoha_recovery_accept_gdm4_rx() &&
-	      sport == eth->gdm4_src_port)) {
+	    !(airoha_recovery_accept_gdm4_rx(eth) &&
+	      airoha_sport_is_gdm4(eth, sport))) {
 		airoha_qdma_recycle_rx_desc(qdma, q, qid);
 		return -EAGAIN;
 	}
@@ -6053,6 +6352,17 @@ static int arht_eth_write_hwaddr(struct udevice *dev)
 			   FIELD_PREP(PCS_XFI_MACADDRH_MASK,
 				      (mac[0] << 8) | mac[1]));
 		airoha_rmw(eth->eth_pcs_xfi_mac, PCS_XFI_MACADDRL,
+			   PCS_XFI_MACADDRL_MASK,
+			   FIELD_PREP(PCS_XFI_MACADDRL_MASK,
+				      (mac[2] << 24) | (mac[3] << 16) |
+						      (mac[4] << 8) | mac[5]));
+	}
+	if (eth->usb_pcs_xfi_mac) {
+		airoha_rmw(eth->usb_pcs_xfi_mac, PCS_XFI_MACADDRH,
+			   PCS_XFI_MACADDRH_MASK,
+			   FIELD_PREP(PCS_XFI_MACADDRH_MASK,
+				      (mac[0] << 8) | mac[1]));
+		airoha_rmw(eth->usb_pcs_xfi_mac, PCS_XFI_MACADDRL,
 			   PCS_XFI_MACADDRL_MASK,
 			   FIELD_PREP(PCS_XFI_MACADDRL_MASK,
 				      (mac[2] << 24) | (mac[3] << 16) |

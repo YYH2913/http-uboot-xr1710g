@@ -32,6 +32,22 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
+		phy5: ethernet-phy@5 {
+			compatible = "ethernet-phy-ieee802.3-c45";
+			reg = <5>;
+			reset-gpios = <&en7581_pinctrl 29 GPIO_ACTIVE_LOW>;
+			reset-assert-us = <200000>;
+			reset-deassert-us = <200000>;
+		};
+
+		phy8: ethernet-phy@8 {
+			compatible = "ethernet-phy-ieee802.3-c45";
+			reg = <8>;
+			reset-gpios = <&en7581_pinctrl 27 GPIO_ACTIVE_LOW>;
+			reset-assert-us = <200000>;
+			reset-deassert-us = <200000>;
+		};
+
 		phy13: ethernet-phy@13 {
 			compatible = "ethernet-phy-ieee802.3-c22";
 			reg = <13>;
@@ -58,16 +74,20 @@
 	status = "okay";
 	pinctrl-names = "default";
 	pinctrl-0 = <&mdio_pins>;
-	airoha,phy-poll-start = <13>;
+	airoha,phy-poll-start = <5>;
 	airoha,phy-poll-end = <15>;
 };
 
 &gdm4 {
 	status = "okay";
-	phy-mode = "2500base-x";
-	phy-handle = <&phy13>;
-	pcs = <&usb_pcs>;
+	phy-mode = "usxgmii";
+	phy-handle = <&phy8>;
+	pcs = <&eth_pcs>;
 	airoha,usb-hsgmii;
-	airoha,source-port = <0x19>;
-	airoha,tx-channel = <12>;
+	airoha,source-port = <0x18>;
+	airoha,tx-channel = <13>;
+	secondary-pcs = <&usb_pcs>;
+	secondary-phy = <&phy13>;
+	airoha,secondary-source-port = <0x19>;
+	airoha,secondary-tx-channel = <12>;
 };
