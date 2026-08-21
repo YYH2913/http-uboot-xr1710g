@@ -1,0 +1,29 @@
+ECNT> crc32 81800000 fadca; iminfo 81800000
+CRC32 for 81800000 ... 818fadc9 ==> 5deb632d
+
+## Checking Image at 81800000 ...
+   FIT image found
+   FIT description: XG2010G stock-bootm compatible chainloader FIT (LZMA shim)
+    Image 0 (fdt@1)
+     Description:  XG2010G chainloader control DTB
+     Type:         Flat Device Tree
+     Data Size:    266 Bytes = 266 Bytes
+     Hash algo:    sha1
+    Image 1 (kernel@1)
+     Description:  XG2010G chainloader shim
+     Type:         Kernel Image
+     Data Size:    4076 Bytes = 4 KiB
+     Load Address: 0x80088000
+     Entry Point:  0x80088000
+     Hash algo:    sha1
+    Image 2 (uboot@1)
+     Description:  XG2010G second-stage U-Boot payload
+     Type:         Firmware
+     Data Size:    1021736 Bytes = 997.8 KiB
+     Load Address: 0x81e00000
+     Hash algo:    sha1
+## Checking hash(es) for FIT Image at 81800000 ...
+   Hash(es) for Image 0 (fdt@1): sha1+
+   Hash(es) for Image 1 (kernel@1): sha1+
+   Hash(es) for Image 2 (uboot@1): sha1+
+ECNT>

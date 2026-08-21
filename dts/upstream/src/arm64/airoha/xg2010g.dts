@@ -14,6 +14,10 @@
 	compatible = "axon,xg2010g", "econet,xg2010g",
 		     "econet,en7581", "airoha,an7581", "airoha,en7581";
 	recovery-gpios = <&en7581_pinctrl 0 GPIO_ACTIVE_LOW>;
+	recovery-link-mdio = <&mdio>;
+	recovery-link-phy-addrs = <12>;
+	recovery-green-led-gpios = <&en7581_pinctrl 46 GPIO_ACTIVE_LOW>;
+	recovery-yellow-led-gpios = <&en7581_pinctrl 42 GPIO_ACTIVE_LOW>;
 
 	aliases {
 		serial0 = &uart1;

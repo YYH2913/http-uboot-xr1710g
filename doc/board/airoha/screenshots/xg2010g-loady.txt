@@ -1,0 +1,5 @@
+ECNT> loady 0x81800000
+## Ready for binary (ymodem) download to 0x81800000 at 115200 bps...
+C
+## Total Size      = 0x000fadca = 1027530 Bytes
+ECNT>
