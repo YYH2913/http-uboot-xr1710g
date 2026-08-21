@@ -380,6 +380,8 @@
 #define SWITCH_FE2SW_STAG_EN BIT(0)
 
 #define AIROHA_RECOVERY_SWITCH_CPU_PORT 6
+#define AIROHA_RECOVERY_SWITCH_PORT_MASK_DEFAULT (BIT(1) | BIT(2))
+#define AIROHA_RECOVERY_PHY_MASK_DEFAULT (BIT(9) | BIT(10))
 #define AIROHA_RECOVERY_LAN_FLAP_MIN_MS 1500
 #define AIROHA_RECOVERY_LAN_UP_SETTLE_MS 700
 #define AIROHA_RECOVERY_SWITCH_DOWN_SETTLE_MS 50
@@ -838,6 +840,8 @@ struct airoha_eth {
 	u8 gdm3_tx_channel;
 	u8 gdm3_nboq;
 	u8 gdm3_phy_addr;
+	u32 recovery_switch_port_mask;
+	u32 recovery_phy_mask;
 	u8 default_tx_fport;
 	u8 last_tx_fport;
 	u8 last_rx_fport;
@@ -2535,7 +2539,7 @@ static void airoha_switch_recovery_program_ports(struct airoha_eth *eth,
 						 bool enable)
 {
 	u32 cpu_port_mask = BIT(AIROHA_RECOVERY_SWITCH_CPU_PORT);
-	u32 user_port_mask = GENMASK(5, 0);
+	u32 user_port_mask = eth->recovery_switch_port_mask;
 	int port;
 
 	if (!eth->switch_regs)
@@ -2543,20 +2547,21 @@ static void airoha_switch_recovery_program_ports(struct airoha_eth *eth,
 
 	airoha_switch_wr(eth, SWITCH_PMCR(AIROHA_RECOVERY_SWITCH_CPU_PORT),
 			 airoha_switch_recovery_pmcr(enable));
-	airoha_switch_wr(eth, SWITCH_PMCR(1),
-			 airoha_switch_recovery_pmcr(enable));
-	airoha_switch_wr(eth, SWITCH_PMCR(2),
-			 airoha_switch_recovery_pmcr(enable));
+	for (port = 0; port < AIROHA_RECOVERY_SWITCH_CPU_PORT; port++) {
+		if (user_port_mask & BIT(port))
+			airoha_switch_wr(eth, SWITCH_PMCR(port),
+					 airoha_switch_recovery_pmcr(enable));
+	}
 
 	for (port = 0; port <= AIROHA_RECOVERY_SWITCH_CPU_PORT; port++) {
 		u32 matrix = 0;
 		u32 pvc = FIELD_PREP(SWITCH_STAG_VPID, 0x8100) |
 			  FIELD_PREP(SWITCH_VLAN_ATTR, SWITCH_VLAN_ATTR_USER);
 
-		if (enable)
-			matrix = port == AIROHA_RECOVERY_SWITCH_CPU_PORT ?
-					 user_port_mask :
-					 cpu_port_mask;
+		if (enable && port == AIROHA_RECOVERY_SWITCH_CPU_PORT)
+			matrix = user_port_mask;
+		else if (enable && (user_port_mask & BIT(port)))
+			matrix = cpu_port_mask;
 		if (port == AIROHA_RECOVERY_SWITCH_CPU_PORT)
 			pvc |= SWITCH_PORT_SPEC_TAG;
 
@@ -3469,9 +3474,8 @@ static int airoha_recovery_lan_phy_read_ctrl(struct airoha_eth *eth, int phy)
 
 static bool airoha_recovery_lan_phy_set_power(struct airoha_eth *eth, bool up)
 {
-	static const int lan_phy_addrs[] = { 9, 10 };
 	bool changed = false;
-	int i;
+	int phy;
 
 	if (!airoha_recovery_lan_phy_flap_enabled())
 		return false;
@@ -3479,10 +3483,13 @@ static bool airoha_recovery_lan_phy_set_power(struct airoha_eth *eth, bool up)
 	if (up)
 		airoha_recovery_lan_wait_power_down();
 
-	for (i = 0; i < ARRAY_SIZE(lan_phy_addrs); i++) {
-		int phy = lan_phy_addrs[i];
-		int ctrl = airoha_recovery_lan_phy_read_ctrl(eth, phy);
+	for (phy = 0; phy < 32; phy++) {
+		int ctrl;
 		u16 new_ctrl;
+
+		if (!(eth->recovery_phy_mask & BIT(phy)))
+			continue;
+		ctrl = airoha_recovery_lan_phy_read_ctrl(eth, phy);
 
 		if (ctrl < 0) {
 			printf("airoha: recovery PHY %d BMCR read failed: %d\n",
@@ -4445,8 +4452,8 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 	u64 gdm4_tx_ok_pkts = 0, gdm4_tx_eth_pkts = 0, gdm4_rx_ok_pkts = 0;
 	u32 gdm4_tx_drop = 0, gdm4_rx_drop = 0;
 	u32 sw_mfc = 0, sw_cfc = 0, sw_atc = 0;
-	u32 sw_pmcr1 = 0, sw_pmcr2 = 0, sw_pmcr6 = 0;
-	u32 sw_pcr1 = 0, sw_pcr2 = 0, sw_pcr6 = 0;
+	u32 sw_pmcr1 = 0, sw_pmcr2 = 0, sw_pmcr4 = 0, sw_pmcr6 = 0;
+	u32 sw_pcr1 = 0, sw_pcr2 = 0, sw_pcr4 = 0, sw_pcr6 = 0;
 	u32 phy_serdes_cfg = 0;
 	u32 mode = PCS_USXGMII_MODE_10000;
 	u32 rate_adapt = PCS_HSGMII_FORCE_RATE_MODE_10000;
@@ -4459,6 +4466,7 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 	int pma_mgbt = -1, pma_pair = -1, pcs_br1 = -1, pcs_br2 = -1;
 	int an_mgbt_ctrl1 = -1, an_mgbt_stat1 = -1;
 	int phy9_ctrl = -1, phy9_stat = -1, phy10_ctrl = -1, phy10_stat = -1;
+	int phy12_ctrl = -1, phy12_stat = -1;
 	int gdm3_phy_rst = -ENODEV, gdm3_mac_rst = -ENODEV;
 	int phy5_sds_7_10 = -ENODEV, phy5_sds_6_12 = -ENODEV;
 	int phy5_sds_5_0 = -ENODEV, phy5_sds_6_3 = -ENODEV;
@@ -4613,9 +4621,11 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 		sw_atc = airoha_switch_rr(eth, SWITCH_ATC);
 		sw_pmcr1 = airoha_switch_rr(eth, SWITCH_PMCR(1));
 		sw_pmcr2 = airoha_switch_rr(eth, SWITCH_PMCR(2));
+		sw_pmcr4 = airoha_switch_rr(eth, SWITCH_PMCR(4));
 		sw_pmcr6 = airoha_switch_rr(eth, SWITCH_PMCR(6));
 		sw_pcr1 = airoha_switch_rr(eth, SWITCH_PCR(1));
 		sw_pcr2 = airoha_switch_rr(eth, SWITCH_PCR(2));
+		sw_pcr4 = airoha_switch_rr(eth, SWITCH_PCR(4));
 		sw_pcr6 = airoha_switch_rr(eth, SWITCH_PCR(6));
 	}
 
@@ -4623,6 +4633,9 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 	phy9_stat = airoha_mdio_c22_read(eth, 9, MII_BMSR);
 	phy10_ctrl = airoha_mdio_c22_read(eth, 10, MII_BMCR);
 	phy10_stat = airoha_mdio_c22_read(eth, 10, MII_BMSR);
+	phy12_ctrl = airoha_mdio_c22_read(eth, 12, MII_BMCR);
+	phy12_stat = airoha_mdio_read_lstatus(eth, 12, MDIO_DEVAD_NONE,
+					      MII_BMSR);
 
 	if (eth->eth_pcs_xfi_mac) {
 		xfi_gib_cfg = airoha_rr(eth->eth_pcs_xfi_mac, PCS_XFI_GIB_CFG);
@@ -4862,10 +4875,13 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 	printf("rtl8261: %s mac fe[lan=%08x/%08x wan=%08x/%08x] xfi=%08x/%08x\n",
 	       tag ? tag : "diag", fe_lan_mac_h, fe_lan_mac_lmin,
 	       fe_wan_mac_h, fe_wan_mac_lmin, xfi_mac_h, xfi_mac_l);
-	printf("rtl8261: %s switch mfc=%08x cfc=%08x atc=%08x p1[pcr=%08x pmcr=%08x] p2[pcr=%08x pmcr=%08x] p6[pcr=%08x pmcr=%08x] phy9[ctl=%04x sts=%04x] phy10[ctl=%04x sts=%04x] flap_down=%lu\n",
-	       tag ? tag : "diag", sw_mfc, sw_cfc, sw_atc, sw_pcr1, sw_pmcr1,
-	       sw_pcr2, sw_pmcr2, sw_pcr6, sw_pmcr6, phy9_ctrl, phy9_stat,
-	       phy10_ctrl, phy10_stat, airoha_recovery_lan_power_down_ms);
+	printf("rtl8261: %s switch mask[port=%02x phy=%08x] mfc=%08x cfc=%08x atc=%08x p1[%08x/%08x] p2[%08x/%08x] p4[%08x/%08x] p6[%08x/%08x] phy9[%04x/%04x] phy10[%04x/%04x] phy12[%04x/%04x] flap_down=%lu\n",
+	       tag ? tag : "diag", eth->recovery_switch_port_mask,
+	       eth->recovery_phy_mask,
+	       sw_mfc, sw_cfc, sw_atc, sw_pcr1, sw_pmcr1,
+	       sw_pcr2, sw_pmcr2, sw_pcr4, sw_pmcr4, sw_pcr6, sw_pmcr6,
+	       phy9_ctrl, phy9_stat, phy10_ctrl, phy10_stat,
+	       phy12_ctrl, phy12_stat, airoha_recovery_lan_power_down_ms);
 	printf("rtl8261: %s xsi ctl[gib=%08x rst=%08x int=%08x en=%08x fc=%08x fifo=%08x fault=%08x if=%08x]\n",
 	       tag ? tag : "diag", xfi_gib_cfg, xfi_logic_rst, xsi_int_sts,
 	       xsi_int_en, xsi_fc_sts, xsi_fifo_sts, xsi_fault_sts, xsi_if_sts);
@@ -5711,7 +5727,15 @@ static int airoha_forced_tx_fport(struct airoha_eth *eth)
 
 static bool airoha_recovery_lan_up(struct airoha_eth *eth)
 {
-	return airoha_mdio_link_up(eth, 9) || airoha_mdio_link_up(eth, 10);
+	int phy;
+
+	for (phy = 0; phy < 32; phy++) {
+		if ((eth->recovery_phy_mask & BIT(phy)) &&
+		    airoha_mdio_link_up(eth, phy))
+			return true;
+	}
+
+	return false;
 }
 
 static void airoha_recovery_set_default_fport(struct airoha_eth *eth, u8 fport)
@@ -6862,6 +6886,17 @@ static int airoha_switch_init(struct udevice *dev, struct airoha_eth *eth)
 
 	/* Switch doesn't have a DEV, gets address and setup Flood and CPU port */
 	eth->switch_regs = map_sysmem(addr, 0);
+	eth->recovery_switch_port_mask = ofnode_read_u32_default(
+		switch_node, "airoha,recovery-switch-port-mask",
+		AIROHA_RECOVERY_SWITCH_PORT_MASK_DEFAULT) & GENMASK(5, 0);
+	eth->recovery_phy_mask = ofnode_read_u32_default(
+		switch_node, "airoha,recovery-phy-mask",
+		AIROHA_RECOVERY_PHY_MASK_DEFAULT);
+	if (!eth->recovery_switch_port_mask)
+		eth->recovery_switch_port_mask =
+			AIROHA_RECOVERY_SWITCH_PORT_MASK_DEFAULT;
+	if (!eth->recovery_phy_mask)
+		eth->recovery_phy_mask = AIROHA_RECOVERY_PHY_MASK_DEFAULT;
 
 	airoha_switch_recovery_runtime_init(eth);
 

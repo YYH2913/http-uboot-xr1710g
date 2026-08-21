@@ -133,6 +133,8 @@
 	pinctrl-0 = <&mdio_pins>;
 	airoha,phy-poll-start = <5>;
 	airoha,phy-poll-end = <15>;
+	airoha,recovery-switch-port-mask = <0x10>;
+	airoha,recovery-phy-mask = <0x1000>;
 };
 
 &gdm4 {
