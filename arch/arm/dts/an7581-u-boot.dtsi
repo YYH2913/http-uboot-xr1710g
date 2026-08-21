@@ -79,11 +79,12 @@
 				 <&scuclk EN7581_FE_PDMA_RST>,
 				 <&scuclk EN7581_FE_QDMA_RST>,
 				 <&scuclk EN7581_DUAL_HSI0_MAC_RST>,
+				 <&scuclk EN7581_DUAL_HSI1_RST>,
 				 <&scuclk EN7581_DUAL_HSI1_MAC_RST>,
 				 <&scuclk EN7581_HSI_MAC_RST>,
 				 <&scuclk EN7581_XFP_MAC_RST>;
 			reset-names = "fe", "pdma", "qdma",
-				      "hsi0-mac", "hsi1-mac", "hsi-mac",
+				      "hsi0-mac", "hsi1-phy", "hsi1-mac", "hsi-mac",
 				      "xfp-mac";
 
 			gdm1: ethernet@1 {

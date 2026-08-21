@@ -16,9 +16,8 @@ Build the second-stage U-Boot image with an AArch64 cross compiler::
    make CROSS_COMPILE=aarch64-linux-gnu-
 
 ``u-boot.bin`` and ``u-boot.img`` are build inputs, not directly flashable
-XG2010G slot images. The vendor first-stage loader requires a packaged slot
-image with its FIT at offset ``0x2100``. That packaging step is not provided by
-this tree.
+XG2010G images. The chainloader FIT is the image read by the stock boot command
+from the chainloader partition and must start at logical offset ``0``.
 
 Flash layout
 ------------
@@ -54,8 +53,8 @@ Boot and recovery
 The default boot path reads the ``fit`` volume from ``ubi`` and uses the same
 ``config-1`` convention as XR1710G. If UBI is not formatted or does not contain
 a bootable image, U-Boot falls back to the stock ``tclinux_slave`` view. The
-stock loader skips bad NAND blocks, reads the FIT header at logical offset
-``0x2100``, and loads only the FIT's declared total size.
+chainloader path reads the FIT header at logical offset ``0`` and loads only
+the FIT's declared total size.
 
 Holding reset (GPIO 0, active low) during U-Boot startup enters HTTP recovery
 at ``http://192.168.255.1``. Firmware recovery accepts an OpenWrt FIT image,
@@ -64,8 +63,10 @@ creates ``rootfs_data`` from the remaining space. The erase range is strictly
 ``0x00700000..0x1bd00000``; DSD, ART and BMT/BBT data remain untouched.
 
 The U-Boot upload target is capped at the 1 MiB ``chainloader`` region starting
-at ``0x00600000`` and accepts only a packaged chainloader slot image. Do not
-upload a bare FIT, ``u-boot.bin``, or ``u-boot.img``.
+at ``0x00600000``. Web recovery accepts a bare FIT or an older packaged slot as
+input, validates the FIT, extracts it when necessary, erases the 1 MiB region,
+and writes the FIT at offset ``0``. Do not upload ``u-boot.bin`` or
+``u-boot.img`` directly.
 
 Factory data and environment
 ----------------------------
@@ -82,32 +83,33 @@ UBI is initialized, environment loading falls back to compiled defaults and
 Ethernet
 --------
 
-U-Boot exposes the three XG2010G copper recovery paths as LAN ports. The two
-Multi-SerDes endpoints share FE ``gdm4`` but retain independent source-port and
-QDMA-channel metadata, while the 1G port continues to use the internal
-``gdm1`` switch path:
+U-Boot exposes all four XG2010G copper ports as LAN recovery paths. LAN1 and
+LAN3 share FE ``gdm4`` but retain independent source-port and QDMA-channel
+metadata, LAN2 uses ``gdm3``, and LAN4 continues to use the internal ``gdm1``
+switch path. PON uses ``gdm2`` and is not a copper recovery port:
 
 ============ =========================== =========== ============
 Port         Host path                   Source port QDMA channel
 ============ =========================== =========== ============
 LAN1 / 10G   Ethernet USXGMII, RTL8261   0x18        13
+LAN2 / 10G   PCIe1 USXGMII, RTL8261      0x17        11 (NBOQ 5)
 LAN3 / 2.5G  USB Multi-SerDes HSGMII     0x19        12
 LAN4 / 1G    Internal switch/ePHY        -           -
 ============ =========================== =========== ============
 
-LAN1 uses RTL8261 MDIO address 8 and active-low reset GPIO 27. The other
-RTL8261 at address 5/GPIO 29 is retained in the device tree and initialized,
-but it is not part of the three-port recovery data path. LAN3 uses an Airoha
-EN8811H at primary MDIO address 13 with auxiliary addresses 14 and 15; its
-active-low reset is GPIO 31. The EN8811H MD32 firmware extracted from the stock
-root filesystem is LZMA-compressed and embedded in U-Boot, so PHY
-initialization does not depend on a filesystem.
+LAN1 uses RTL8261 MDIO address 5 and active-low reset GPIO 29. LAN2 uses the
+second RTL8261 at address 8/GPIO 27. LAN3 uses an Airoha EN8811H at primary
+MDIO address 15 with auxiliary addresses 13 and 14; its active-low reset is
+GPIO 31. The EN8811H MD32 firmware extracted from the stock root filesystem is
+LZMA-compressed and embedded in U-Boot, so PHY initialization does not depend
+on a filesystem.
 
-In the default ``auto`` mode, broadcasts and multicasts are copied to LAN1,
-LAN3 and LAN4. RX source-port metadata is cached per peer MAC so unicast replies
+In the default ``auto`` mode, broadcasts and multicasts are copied to all four
+LAN paths. RX source-port metadata is cached per peer MAC so unicast replies
 return through the same endpoint. Set ``recovery_port`` to ``lan1`` or ``10g``
-for LAN1 only, ``lan3``, ``2.5g``, ``2g5``, ``2500`` or ``usb`` for LAN3 only,
-and ``lan4`` or ``1g`` for LAN4 only.
+for LAN1 only; ``lan2``, ``pcie`` or ``pcie1`` for LAN2 only; ``lan3``,
+``2.5g``, ``2g5``, ``2500`` or ``usb`` for LAN3 only; and ``lan4`` or ``1g``
+for LAN4 only.
 
 Hardware status
 ---------------
@@ -116,6 +118,6 @@ The partition map, FIT offset, 1 GiB DRAM size, MAC data format, Ethernet and
 USB Multi-SerDes register windows, source ports, QDMA channels and external PHY
 addresses were checked against the stock ``XG2010G_fw_1.0.0.13`` dump and SDK.
 The stock environment selects ``serdes_ethernet=411`` and
-``serdes_usb1=111``. U-Boot build and DTB checks cover all three recovery
+``serdes_usb1=111``. U-Boot build and DTB checks cover all four recovery
 paths, but physical link, packet traffic, reset-button entry and destructive
 recovery still require validation on XG2010G hardware before deployment.

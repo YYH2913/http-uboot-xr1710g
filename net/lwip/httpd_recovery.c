@@ -123,8 +123,11 @@ ulong airoha_recovery_get_lan_activity_ms(void);
 #define RECOVERY_FACTORY_SIZE  (1 * 1024 * 1024UL)
 #define RECOVERY_UBI_WRITE_CHUNK (1024 * 1024U)
 #define RECOVERY_UBOOT_SLOT_FIT_OFFSET 0x2100U
+#define RECOVERY_UBOOT_SLOT_SIZE       (1 * 1024 * 1024UL)
 #define RECOVERY_UBOOT_SLOT_DEFAULT_OFS 0x600000UL
 #define RECOVERY_UBOOT_SLOT_DEFAULT_DEV "spi-nand0"
+#define RECOVERY_XG2010G_RUNNING_FIT_ADDR 0x81800000UL
+#define RECOVERY_XG2010G_INSTALL_TOKEN "XG2010G_INSTALL"
 #define RECOVERY_IH_MAGIC 0x27051956U
 #define RECOVERY_FDT_MAGIC 0xd00dfeedU
 
@@ -133,6 +136,7 @@ static u32 recv_off;
 static u32 recv_total;
 static int post_ok;
 static int flash_request;
+static bool self_write_request;
 static volatile int reboot_request;
 /* Progress for /status polling */
 static volatile u32 prog_total; /* combined total for backward compat */
@@ -204,6 +208,70 @@ static u32 recovery_be32_to_cpu(const void *p)
 
 	return ((u32)b[0] << 24) | ((u32)b[1] << 16) |
 	       ((u32)b[2] << 8) | b[3];
+}
+
+static bool recovery_board_is_xg2010g(void)
+{
+	return of_machine_is_compatible("axon,xg2010g") ||
+	       of_machine_is_compatible("econet,xg2010g");
+}
+
+static bool recovery_fit_has_hashed_image(const void *fit, const char *name)
+{
+	int child;
+	int images;
+	int image;
+
+	images = fdt_path_offset(fit, FIT_IMAGES_PATH);
+	if (images < 0)
+		return false;
+	image = fdt_subnode_offset(fit, images, name);
+	if (image < 0)
+		return false;
+
+	fdt_for_each_subnode(child, fit, image) {
+		const char *child_name = fit_get_name(fit, child, NULL);
+
+		if (!strncmp(child_name, FIT_HASH_NODENAME,
+			     strlen(FIT_HASH_NODENAME)))
+			return true;
+	}
+
+	return false;
+}
+
+static int recovery_validate_xg2010g_chainloader_fit(const void *fit)
+{
+	const char *desc = fdt_getprop(fit, 0, FIT_DESC_PROP, NULL);
+
+	if (!desc || !strstr(desc, "XG2010G") || !strstr(desc, "chainloader") ||
+	    !recovery_fit_has_hashed_image(fit, "fdt@1") ||
+	    !recovery_fit_has_hashed_image(fit, "kernel@1") ||
+	    !recovery_fit_has_hashed_image(fit, "uboot@1")) {
+		printf("U-Boot FIT is not an XG2010G chainloader image\n");
+		return -ENOEXEC;
+	}
+
+	return 0;
+}
+
+static int recovery_validate_fit(const void *fit, size_t size)
+{
+	int ret;
+
+	ret = fit_check_format(fit, size);
+	if (ret)
+		return ret;
+	if (recovery_board_is_xg2010g()) {
+		ret = recovery_validate_xg2010g_chainloader_fit(fit);
+		if (ret)
+			return ret;
+	}
+	if (!fit_all_image_verify(fit)) {
+		printf("XG2010G U-Boot FIT image hash verification failed\n");
+		return -EBADMSG;
+	}
+	return 0;
 }
 
 enum upload_target {
@@ -1681,6 +1749,25 @@ static void recovery_release_target(struct recovery_target *target)
 	target->mtd = NULL;
 }
 
+static int recovery_validate_xg2010g_uboot_target(
+	const struct recovery_target *target)
+{
+	if (!recovery_board_is_xg2010g())
+		return 0;
+
+	if (!target || target->backend != RECOVERY_BACKEND_MTD || !target->mtd ||
+	    strcmp(target->mtd->name, RECOVERY_UBOOT_SLOT_DEFAULT_DEV) ||
+	    target->ofs != RECOVERY_UBOOT_SLOT_DEFAULT_OFS ||
+	    target->limit != RECOVERY_UBOOT_SLOT_SIZE) {
+		printf("Refusing U-Boot write outside spi-nand0 0x%lx..0x%lx\n",
+		       RECOVERY_UBOOT_SLOT_DEFAULT_OFS,
+		       RECOVERY_UBOOT_SLOT_DEFAULT_OFS + RECOVERY_UBOOT_SLOT_SIZE);
+		return -EPERM;
+	}
+
+	return 0;
+}
+
 static int recovery_force_ubi_rebuild(struct recovery_target *target)
 {
 	struct mtd_info *mtd;
@@ -1719,29 +1806,136 @@ static void recovery_service_runtime(struct recovery_status_led_ctrl *status_led
 	WATCHDOG_RESET();
 }
 
-static int recovery_validate_uboot_slot_image(const void *image, size_t size)
+static int recovery_prepare_uboot_fit(const void *image, size_t size,
+					const u8 **fit, size_t *fit_size)
 {
 	const u8 *p = image;
 	u32 prefix_magic;
-	u32 fit_magic;
+	u32 candidate_size;
 
-	if (size <= RECOVERY_UBOOT_SLOT_FIT_OFFSET + sizeof(u32)) {
-		printf("U-Boot slot image is too small: %lu bytes\n",
-		       (unsigned long)size);
+	if (size < sizeof(struct fdt_header))
 		return -EINVAL;
+
+	/* Web uploads may be a bare FIT or a packaged slot. */
+	if (recovery_be32_to_cpu(p) == RECOVERY_FDT_MAGIC) {
+		candidate_size = fdt_totalsize(p);
+		if (candidate_size < sizeof(struct fdt_header) ||
+		candidate_size > size)
+			return -EFBIG;
+		*fit = p;
+		*fit_size = candidate_size;
+		return recovery_validate_fit(p, candidate_size);
 	}
 
+	/* Accept the legacy packaged slot form for web/API compatibility. */
+	if (size <= RECOVERY_UBOOT_SLOT_FIT_OFFSET + sizeof(u32))
+		return -EINVAL;
 	prefix_magic = recovery_be32_to_cpu(p);
-	fit_magic = recovery_be32_to_cpu(p + RECOVERY_UBOOT_SLOT_FIT_OFFSET);
-
 	if (prefix_magic != RECOVERY_IH_MAGIC ||
-	    fit_magic != RECOVERY_FDT_MAGIC) {
-		printf("Invalid U-Boot slot image: magic[0]=0x%08x magic[0x%04x]=0x%08x\n",
-		       prefix_magic, RECOVERY_UBOOT_SLOT_FIT_OFFSET, fit_magic);
-		printf("Expected a packaged chainloader slot image, not u-boot.bin or a bare .itb\n");
+	    recovery_be32_to_cpu(p + RECOVERY_UBOOT_SLOT_FIT_OFFSET) !=
+		    RECOVERY_FDT_MAGIC) {
+		printf("Invalid XG2010G U-Boot upload: expected FIT at offset 0 or 0x%x\n",
+		       RECOVERY_UBOOT_SLOT_FIT_OFFSET);
 		return -EINVAL;
 	}
 
+	p += RECOVERY_UBOOT_SLOT_FIT_OFFSET;
+	candidate_size = fdt_totalsize(p);
+	if (candidate_size < sizeof(struct fdt_header) ||
+	candidate_size > size - RECOVERY_UBOOT_SLOT_FIT_OFFSET)
+		return -EFBIG;
+	*fit = p;
+	*fit_size = candidate_size;
+	return recovery_validate_fit(p, candidate_size);
+}
+
+/*
+ * Canonicalize the receive buffer to the persistent XG2010G format.  The
+ * stock boot command reads the raw FIT from 0x600000 into fit-base and then
+ * invokes bootm there.  Accept the older dual-entry wrapper as an input
+ * convenience, but never persist its legacy uImage prefix: the chainloader
+ * shim expects the FIT at the beginning of RAM.
+ */
+static int recovery_normalize_uboot_fit(const u8 *fit, size_t fit_size)
+{
+	u8 *dst = recv_base;
+
+	if (!dst || fit_size > RECOVERY_UBOOT_SLOT_SIZE)
+		return -EFBIG;
+
+	if (fit != dst)
+		memmove(dst, fit, fit_size);
+	/* Keep the rest erased when the target is read as a full 1 MiB window. */
+	memset(dst + fit_size, 0xff, RECOVERY_UBOOT_SLOT_SIZE - fit_size);
+
+	return 0;
+}
+
+static bool recovery_ram_range_ok(ulong addr, size_t size)
+{
+	ulong ram_start = (ulong)gd->ram_base;
+	ulong ram_size = (ulong)gd->ram_size;
+	ulong ram_end;
+
+	if (!ram_size || addr < ram_start || ram_size > ULONG_MAX - ram_start)
+		return false;
+	ram_end = ram_start + ram_size;
+
+	return addr <= ram_end && size <= ram_end - addr;
+}
+
+static int recovery_copy_running_chainloader_fit(u8 **imagep, size_t *sizep)
+{
+	const ulong addr = RECOVERY_XG2010G_RUNNING_FIT_ADDR;
+	const u8 *fit = (const u8 *)addr;
+	const u8 *prepared_fit;
+	size_t prepared_size;
+	size_t fit_size;
+	u8 *copy;
+	int ret;
+
+	if (!recovery_board_is_xg2010g()) {
+		printf("Chainloader self-write is only available on XG2010G\n");
+		return -ENODEV;
+	}
+	if (!recovery_ram_range_ok(addr, sizeof(struct fdt_header)) ||
+	    fdt_check_header(fit)) {
+		printf("No running XG2010G chainloader FIT at 0x%08lx\n", addr);
+		return -ENOENT;
+	}
+
+	fit_size = fdt_totalsize(fit);
+	if (fit_size < sizeof(struct fdt_header) ||
+	    fit_size > RECOVERY_UBOOT_SLOT_SIZE ||
+	    !recovery_ram_range_ok(addr, fit_size)) {
+		printf("Running chainloader FIT size %lu is invalid\n",
+		       (ulong)fit_size);
+		return -EFBIG;
+	}
+
+	ret = recovery_prepare_uboot_fit(fit, fit_size, &prepared_fit,
+					 &prepared_size);
+	if (ret)
+		return ret;
+	if (prepared_fit != fit || prepared_size != fit_size)
+		return -ENOEXEC;
+
+	copy = malloc(RECOVERY_UBOOT_SLOT_SIZE);
+	if (!copy)
+		return -ENOMEM;
+	memcpy(copy, fit, fit_size);
+	memset(copy + fit_size, 0xff, RECOVERY_UBOOT_SLOT_SIZE - fit_size);
+
+	ret = recovery_validate_fit(copy, fit_size);
+	if (ret) {
+		free(copy);
+		return ret;
+	}
+
+	*imagep = copy;
+	*sizep = fit_size;
+	printf("Preserved running XG2010G chainloader FIT from 0x%08lx (%lu bytes)\n",
+	       addr, (ulong)fit_size);
 	return 0;
 }
 
@@ -2042,6 +2236,70 @@ out:
 	return ret;
 }
 
+static int recovery_install_running_chainloader(
+	struct recovery_status_led_ctrl *status_leds)
+{
+	struct recovery_target target;
+	u8 *image = NULL;
+	size_t image_size = 0;
+	int ret;
+
+	memset(&target, 0, sizeof(target));
+	ret = recovery_copy_running_chainloader_fit(&image, &image_size);
+	if (ret)
+		goto out;
+
+	ret = recovery_resolve_target(TARGET_UBOOT, &target);
+	if (ret) {
+		printf("Cannot resolve the XG2010G chainloader target: %d\n", ret);
+		goto out;
+	}
+	ret = recovery_validate_xg2010g_uboot_target(&target);
+	if (ret)
+		goto out;
+
+	prog_phase = 1;
+	prog_done = 0;
+	prog_erase_done = 0;
+	prog_erase_total = RECOVERY_UBOOT_SLOT_SIZE;
+	prog_write_done = 0;
+	prog_write_total = image_size;
+	prog_total = prog_erase_total + prog_write_total;
+
+	printf("Installing running chainloader into spi-nand0 0x%lx..0x%lx\n",
+	       RECOVERY_UBOOT_SLOT_DEFAULT_OFS,
+	       RECOVERY_UBOOT_SLOT_DEFAULT_OFS + RECOVERY_UBOOT_SLOT_SIZE);
+	ret = recovery_erase_mtd_region(target.mtd, target.ofs,
+					RECOVERY_UBOOT_SLOT_SIZE, status_leds);
+	if (ret)
+		goto out;
+
+	prog_phase = 2;
+	ret = recovery_write_mtd_region(target.mtd, target.ofs,
+					RECOVERY_UBOOT_SLOT_SIZE, image,
+					image_size, true, status_leds);
+	if (ret)
+		goto out;
+
+	prog_phase = 3;
+	printf("Running chainloader installed and read-back verified (%lu bytes)\n",
+	       (ulong)image_size);
+
+out:
+	if (ret)
+		prog_phase = -1;
+	recovery_release_target(&target);
+	free(image);
+	return ret;
+}
+
+int xg2010g_install_running_chainloader(void)
+{
+	struct recovery_status_led_ctrl status_leds = { 0 };
+
+	return recovery_install_running_chainloader(&status_leds);
+}
+
 static bool recovery_preserve_ubi_volume(const char *name)
 {
 	if (!name || !*name)
@@ -2168,10 +2426,29 @@ static int recovery_remove_ubi_volume(const char *name)
 #endif
 }
 
+static size_t recovery_rootfs_data_size(void)
+{
+	const char *value = env_get("rootfs_data_max");
+	unsigned long long parsed;
+	char *end;
+
+	if (!value || !*value)
+		return 0;
+
+	parsed = simple_strtoull(value, &end, 0);
+	if (*end || !parsed || parsed > (size_t)-1) {
+		printf("Ignoring invalid rootfs_data_max '%s'\n", value);
+		return 0;
+	}
+
+	return parsed;
+}
+
 static int recovery_ensure_rootfs_data(struct recovery_target *target)
 {
 #if IS_ENABLED(CONFIG_CMD_UBI) && IS_ENABLED(CONFIG_MTD_UBI)
 	struct ubi_volume_desc *desc;
+	size_t size;
 	int ret;
 
 	if (target->backend != RECOVERY_BACKEND_UBI)
@@ -2186,7 +2463,14 @@ static int recovery_ensure_rootfs_data(struct recovery_target *target)
 		return 0;
 	}
 
-	ret = recovery_create_ubi_volume("rootfs_data", 0, UBI_DYNAMIC_VOLUME);
+	size = recovery_rootfs_data_size();
+	ret = recovery_create_ubi_volume("rootfs_data", size,
+					 UBI_DYNAMIC_VOLUME);
+	if (ret == -ENOSPC && size) {
+		printf("rootfs_data_max does not fit; using all available PEBs\n");
+		ret = recovery_create_ubi_volume("rootfs_data", 0,
+						 UBI_DYNAMIC_VOLUME);
+	}
 	if (ret && ret != -EEXIST) {
 		printf("Failed to create UBI volume 'rootfs_data': %d\n", ret);
 		return ret;
@@ -2829,6 +3113,7 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
     }
 
     post_ok = 0;
+    self_write_request = false;
     recovery_ubi_attach_error = 0;
     recv_off = 0;
     recv_total = 0;
@@ -2841,7 +3126,10 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
     prog_write_done = 0;
     prog_write_total = 0;
     /* Accept optional query parameters after the target path. */
-    if (!strncmp(uri, "/upload/firmware", 16) &&
+    if (!strcmp(uri, "/action/self-write")) {
+        current_target = TARGET_UBOOT;
+        self_write_request = true;
+    } else if (!strncmp(uri, "/upload/firmware", 16) &&
         (uri[16] == '\0' || uri[16] == '?')) {
         current_target = TARGET_FIRMWARE;
         if (recovery_parse_ubi_layout(uri)) {
@@ -2912,12 +3200,15 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
         if (!base)
             base = CONFIG_SYS_LOAD_ADDR;
 
-        /* Keep the buffer inside usable RAM. */
-        if (base < ram_start || base >= ram_end ||
-            recv_total > (ram_end - base)) {
+        /* Keep the buffer inside usable RAM, including normalization space. */
+		/* Leave room for NAND page alignment after FIT normalization. */
+		ulong buffer_need = current_target == TARGET_UBOOT ?
+			RECOVERY_UBOOT_SLOT_SIZE : recv_total;
+		if (base < ram_start || base >= ram_end ||
+		    buffer_need > (ram_end - base) - 0x2000) {
             ulong fallback = ram_start + 0x01000000UL;
             if (fallback >= ram_start && fallback < ram_end &&
-                recv_total <= (ram_end - fallback)) {
+                buffer_need <= (ram_end - fallback)) {
                 base = fallback;
             } else {
                 prog_phase = -1;
@@ -2931,7 +3222,9 @@ err_t httpd_post_begin(void *connection, const char *uri, const char *http_reque
 
     post_ok = 1;
     /* Leave response_uri untouched here so the POST can complete normally. */
-    if (current_target == TARGET_FIRMWARE)
+    if (self_write_request)
+        printf("httpd: accepting XG2010G chainloader self-write request\n");
+    else if (current_target == TARGET_FIRMWARE)
         printf("httpd: accepting %u-byte firmware for UBI %s\n",
                recv_total, current_ubi_layout->version);
     else
@@ -2971,10 +3264,52 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p)
 
 void httpd_post_finished(void *connection, char *response_uri, u16_t response_uri_len)
 {
+    const u8 *fit_image;
+    u8 *running_fit = NULL;
+    size_t fit_size;
+    bool complete;
+    int ret = 0;
+
     (void)connection;
     printf("httpd: post finished, %u/%u bytes received\n", recv_off, recv_total);
+    complete = post_ok && recv_total && (recv_off >= recv_total);
+
+    /*
+     * Validate while httpd can still choose the POST response. flash_image()
+     * repeats the same checks immediately before touching flash, but waiting
+     * until then would make a malformed image receive the success page first.
+    */
+    if (complete) {
+        if (self_write_request) {
+            if (recv_off != strlen(RECOVERY_XG2010G_INSTALL_TOKEN) ||
+                memcmp(recv_base, RECOVERY_XG2010G_INSTALL_TOKEN,
+                       strlen(RECOVERY_XG2010G_INSTALL_TOKEN))) {
+                printf("httpd: invalid XG2010G self-write confirmation\n");
+                ret = -EPERM;
+            } else {
+                ret = recovery_copy_running_chainloader_fit(&running_fit,
+                                                              &fit_size);
+                free(running_fit);
+            }
+        } else if (current_target == TARGET_UBOOT) {
+            ret = recovery_prepare_uboot_fit(recv_base, recv_off,
+                                              &fit_image, &fit_size);
+        } else {
+            ret = recovery_validate_firmware_image(recv_base, recv_off);
+        }
+
+        if (ret) {
+            printf("httpd: upload validation failed for target %d: %d\n",
+                   current_target, ret);
+            post_ok = 0;
+            self_write_request = false;
+            prog_phase = -1;
+            complete = false;
+        }
+    }
+
     /* Tell httpd which page to return after POST (keep user on main page) */
-    if (post_ok && recv_total && (recv_off >= recv_total))
+    if (complete)
         strlcpy(response_uri, "/ok", response_uri_len);
     else
         strlcpy(response_uri, "/fail.html", response_uri_len);
@@ -2983,7 +3318,7 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
      * Delay flashing slightly so the browser can finish receiving the POST
      * response before erase/write work blocks the network loop.
      */
-    if (post_ok && recv_total && (recv_off >= recv_total))
+    if (complete)
         sys_timeout(FLASH_START_DELAY_MS, post_delay_cb, NULL);
 }
 
@@ -2991,7 +3326,9 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 {
 	struct recovery_target target;
 	const u8 *image = recv_base;
+	const u8 *fit_image = image;
 	u32 image_size = recv_off;
+	size_t fit_size = image_size;
 	int ret;
 
 	post_ok = 0;
@@ -3003,7 +3340,8 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 	}
 
 	if (current_target == TARGET_UBOOT) {
-		ret = recovery_validate_uboot_slot_image(image, image_size);
+		ret = recovery_prepare_uboot_fit(image, image_size,
+						  &fit_image, &fit_size);
 		if (ret) {
 			prog_phase = -1;
 			return ret;
@@ -3016,11 +3354,43 @@ static int flash_image(struct recovery_status_led_ctrl *status_leds)
 		}
 	}
 
+	if (current_target == TARGET_UBOOT) {
+		/* Keep the raw target available for normalization below. */
+		image = fit_image;
+		image_size = fit_size;
+	}
+
 	ret = recovery_resolve_target(current_target, &target);
 	if (ret) {
 		printf("No flash target found for upload type %d\n", current_target);
 		prog_phase = -1;
 		return ret;
+	}
+
+	if (current_target == TARGET_UBOOT) {
+		ret = recovery_validate_xg2010g_uboot_target(&target);
+		if (ret) {
+			recovery_release_target(&target);
+			prog_phase = -1;
+			return ret;
+		}
+
+		if (RECOVERY_UBOOT_SLOT_SIZE > target.limit) {
+			recovery_release_target(&target);
+			prog_phase = -1;
+			return -EFBIG;
+		}
+
+		ret = recovery_normalize_uboot_fit(fit_image, fit_size);
+		if (ret) {
+			recovery_release_target(&target);
+			prog_phase = -1;
+			return ret;
+		}
+		printf("Normalized U-Boot upload to raw FIT: %u bytes at slot offset 0x0 (window %lu bytes)\n",
+		       (unsigned int)fit_size, RECOVERY_UBOOT_SLOT_SIZE);
+		image = recv_base;
+		image_size = fit_size;
 	}
 
 	if (current_target == TARGET_FIRMWARE &&
@@ -3197,6 +3567,7 @@ int run_http_recovery(void)
 	recv_off = recv_total = 0;
 	post_ok = 0;
 	flash_request = 0;
+	self_write_request = false;
 	reboot_request = 0;
 	prog_phase = 0;
 	prog_done = 0;
@@ -3282,8 +3653,14 @@ int run_http_recovery(void)
 		recovery_led_poll(&leds);
 		if (flash_request) {
 			flash_request = 0;
-			printf("Upload done, flashing...\n");
-			rc = flash_image(&status_leds);
+			if (self_write_request) {
+				printf("Self-write confirmed, installing running chainloader...\n");
+				rc = recovery_install_running_chainloader(&status_leds);
+				self_write_request = false;
+			} else {
+				printf("Upload done, flashing...\n");
+				rc = flash_image(&status_leds);
+			}
 			if (!rc) {
 				printf("Flashing complete. Rebooting in %dms...\n",
 				       REBOOT_DELAY_MS);

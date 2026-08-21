@@ -446,6 +446,10 @@ static int should_load_env(void)
 
 static int initr_env(void)
 {
+	if (of_machine_is_compatible("axon,xg2010g") ||
+	    of_machine_is_compatible("econet,xg2010g"))
+		puts("xg2010g-init: env begin\n");
+
 	/* initialize environment */
 	if (should_load_env())
 		env_relocate();
@@ -465,8 +469,50 @@ static int initr_env(void)
 
 	/* Initialize from environment */
 	image_load_addr = env_get_ulong("loadaddr", 16, image_load_addr);
+	if ((of_machine_is_compatible("axon,xg2010g") ||
+	     of_machine_is_compatible("econet,xg2010g")) &&
+	    env_get_yesno("xg2010g_debug_prompt") == 1)
+		printf("xg2010g-init: env done debug_prompt=1\n");
 
 	return 0;
+}
+
+static int initr_xg2010g_stdio_add_devices(void)
+{
+	int ret;
+
+	if ((of_machine_is_compatible("axon,xg2010g") ||
+	     of_machine_is_compatible("econet,xg2010g")) &&
+	    env_get_yesno("xg2010g_debug_prompt") == 1)
+		puts("xg2010g-init: stdio begin\n");
+
+	ret = stdio_add_devices();
+
+	if ((of_machine_is_compatible("axon,xg2010g") ||
+	     of_machine_is_compatible("econet,xg2010g")) &&
+	    env_get_yesno("xg2010g_debug_prompt") == 1)
+		puts("xg2010g-init: stdio done\n");
+
+	return ret;
+}
+
+static int initr_xg2010g_console_init(void)
+{
+	int ret;
+
+	if ((of_machine_is_compatible("axon,xg2010g") ||
+	     of_machine_is_compatible("econet,xg2010g")) &&
+	    env_get_yesno("xg2010g_debug_prompt") == 1)
+		puts("xg2010g-init: console begin\n");
+
+	ret = console_init_r();
+
+	if ((of_machine_is_compatible("axon,xg2010g") ||
+	     of_machine_is_compatible("econet,xg2010g")) &&
+	    env_get_yesno("xg2010g_debug_prompt") == 1)
+		puts("xg2010g-init: console done\n");
+
+	return ret;
 }
 
 #ifdef CONFIG_SYS_MALLOC_BOOTPARAMS
@@ -496,9 +542,23 @@ static int initr_boot_led_on(void)
 }
 
 #if CONFIG_IS_ENABLED(NET)
+static bool xg2010g_debug_prompt_net_deferred(void)
+{
+	if (!of_machine_is_compatible("axon,xg2010g") &&
+	    !of_machine_is_compatible("econet,xg2010g"))
+		return false;
+
+	return env_get_yesno("xg2010g_debug_prompt") == 1;
+}
+
 static int initr_net(void)
 {
 	puts("Net:   ");
+	if (xg2010g_debug_prompt_net_deferred()) {
+		puts("deferred (xg2010g_debug_prompt=1)\n");
+		return 0;
+	}
+
 	eth_initialize();
 #if defined(CONFIG_RESET_PHY_R)
 	debug("Reset Ethernet PHY\n");
@@ -726,12 +786,12 @@ static void initcall_run_r(void)
 	 */
 	INITCALL(pci_init);
 #endif
-	INITCALL(stdio_add_devices);
+	INITCALL(initr_xg2010g_stdio_add_devices);
 	INITCALL(jumptable_init);
 #if CONFIG_IS_ENABLED(API)
 	INITCALL(api_init);
 #endif
-	INITCALL(console_init_r);	/* fully init console as a device */
+	INITCALL(initr_xg2010g_console_init);	/* fully init console as a device */
 #if CONFIG_IS_ENABLED(DISPLAY_BOARDINFO_LATE)
 	INITCALL(console_announce_r);
 	INITCALL(show_board_info);

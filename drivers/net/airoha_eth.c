@@ -33,6 +33,8 @@
 #include <vsprintf.h>
 #include <asm/arch/scu-regmap.h>
 
+#include "airoha/an7581-pcie1-ana-map.h"
+
 #ifndef MDIO_USXGMII_LINK
 #define MDIO_USXGMII_LINK BIT(15)
 #endif
@@ -43,7 +45,8 @@
 #define AIROHA_MAX_NUM_XSI_RSTS 6
 #define AIROHA_PEER_FPORT_CACHE_SIZE 8
 
-/* Software-only egress ids for the two GDM4 SerDes endpoints. */
+/* Software-only egress ids for external SerDes endpoints. */
+#define AIROHA_FPORT_GDM3_PCIE 6
 #define AIROHA_FPORT_GDM4_ETH 4
 #define AIROHA_FPORT_GDM4_USB 5
 
@@ -66,10 +69,18 @@
 #define SCU_SSR3 0x94
 #define SCU_ETH_XSI_SEL GENMASK(14, 13)
 #define SCU_ETH_XSI_USXGMII FIELD_PREP(SCU_ETH_XSI_SEL, 0x1)
+#define SCU_SSTR 0x9c
+#define SCU_PCIE1_XSI_SEL GENMASK(12, 11)
+#define SCU_PCIE1_XSI_USXGMII FIELD_PREP(SCU_PCIE1_XSI_SEL, 0x1)
+#define SCU_PCIC 0x88
+#define SCU_PCIC_PCIE_MODE GENMASK(7, 0)
 #define SCU_USB0_SERDES_SEL BIT(29)
 #define SCU_GPIO_2ND_I2C_MODE 0x214
 #define SCU_GPIO_MDC_IO_MASTER_MODE BIT(14)
 #define SCU_GPIO_I2C_MASTER_MODE BIT(13)
+#define SCU_GPIO_IOMUX_CTRL_2 0x218
+#define SCU_GPIO_I2C2_MODE BIT(9)
+#define SCU_GPIO_I2C1_MODE BIT(8)
 #define SCU_FORCE_GPIO_EN 0x228
 #define SCU_FORCE_GPIO1_EN BIT(1)
 #define SCU_FORCE_GPIO2_EN BIT(2)
@@ -81,7 +92,9 @@
 #define GPIO_REG_DATA 0x0004
 #define GPIO_REG_OE 0x0014
 #define GPIO_REG_CTRL 0x0000
+#define GPIO_REG_LED_CTRL 0x001c
 #define GPIO_REG_CTRL1 0x0020
+#define GPIO_REG_FLASH_MODE_CFG 0x0034
 #define GPIO_REG_CTRL2 0x0060
 #define GPIO_REG_CTRL3 0x0064
 #define GPIO_REG_DATA1 0x0070
@@ -105,14 +118,42 @@
 #define PCS_XFI_RXMBI_STOP BIT(2)
 #define PCS_XFI_TXMPI_STOP BIT(1)
 #define PCS_XFI_TXMBI_STOP BIT(0)
+#define PCS_XFI_INT_STS 0x0004
+#define PCS_XFI_INT_EN 0x0008
 #define PCS_XFI_LOGIC_RST 0x0010
 #define PCS_XFI_MAC_LOGIC_RST BIT(0)
+#define PCS_XFI_FC_STS 0x0020
+#define PCS_XFI_FIFO_STS 0x004c
 #define PCS_XFI_MACADDRH 0x0060
 #define PCS_XFI_MACADDRH_MASK GENMASK(15, 0)
 #define PCS_XFI_MACADDRL 0x0064
 #define PCS_XFI_MACADDRL_MASK GENMASK(31, 0)
+#define PCS_XFI_FAULT_STS 0x0080
+#define PCS_XFI_IF_STS 0x00cc
 #define PCS_XFI_CNT_CLR 0x0100
 #define PCS_XFI_GLB_CNT_CLR BIT(0)
+#define PCS_XFI_TX_OCTETS_CNT 0x0104
+#define PCS_XFI_TX_PKT_CNT 0x0108
+#define PCS_XFI_TXMBI_ETH_CNT 0x0114
+#define PCS_XFI_TXMBI_UC_ETH_CNT 0x0118
+#define PCS_XFI_TXMBI_MC_BC_CNT 0x011c
+#define PCS_XFI_TXMBI_PAUSE_CNT 0x0120
+#define PCS_XFI_TX_SOF_EOF_CNT 0x0130
+#define PCS_XFI_TX_BYTES_CNT 0x0134
+#define PCS_XFI_TX_NORMAL_PKT_BYTES_CNT 0x0138
+#define PCS_XFI_TX_DEQ_CHECK_CNT1 0x013c
+#define PCS_XFI_TX_DEQ_CHECK_CNT2 0x0140
+#define PCS_XFI_RX_FRAME_CNT 0x0180
+#define PCS_XFI_RX_OCTETS_CNT 0x0184
+#define PCS_XFI_RX_PKT_CNT 0x0188
+#define PCS_XFI_RX_ETH_CNT 0x018c
+#define PCS_XFI_RX_PAUSE_CNT 0x0190
+#define PCS_XFI_RX_LEN_FRAG_ERR_CNT 0x0194
+#define PCS_XFI_RX_CRC_CODING_ERR_CNT 0x0198
+#define PCS_XFI_RXMBI_PKT_CNT 0x019c
+#define PCS_XFI_RXMBI_DROP_CNT 0x01a0
+#define PCS_XFI_RX_SOF_EOF_CNT 0x01a4
+#define PCS_XFI_RX_MPI_SOP_EOP_CNT 0x01a8
 
 #define PCS_MULTI_SGMII_MSG_RX_CTRL_0 0x0100
 #define PCS_HSGMII_XFI_SEL BIT(28)
@@ -176,6 +217,8 @@
 #define PCS_HSGMII_RATE_ADAPT_CTRL_0 0x0000
 #define PCS_HSGMII_RATE_ADAPT_RX_BYPASS BIT(27)
 #define PCS_HSGMII_RATE_ADAPT_TX_BYPASS BIT(26)
+#define PCS_HSGMII_RATE_ADAPT_RX_USXGMII_PCH_MODE BIT(11)
+#define PCS_HSGMII_RATE_ADAPT_TX_USXGMII_PCH_MODE BIT(10)
 #define PCS_HSGMII_RATE_ADAPT_RX_EN BIT(4)
 #define PCS_HSGMII_RATE_ADAPT_TX_EN BIT(0)
 #define PCS_HSGMII_RATE_ADAPT_CTRL_11 0x002c
@@ -230,6 +273,52 @@
 #define PCS_RX_SIGDET BIT(8)
 #define PCS_PMA_RX_FREQDET 0x0530
 #define PCS_PMA_FBCK_LOCK BIT(0)
+
+#define PCS_PMA_RX_CTRL_SEQUENCE_DISB_CTRL_1 0x010c
+#define PCS_PMA_SS_RX_FREQ_DET_1 0x014c
+#define PCS_PMA_SS_RX_FREQ_DET_2 0x0150
+#define PCS_PMA_SS_RX_FREQ_DET_3 0x0154
+#define PCS_PMA_SS_RX_FREQ_DET_4 0x0158
+#define PCS_PMA_RX_FLL_1 0x0174
+#define PCS_PMA_LPATH_IDAC GENMASK(10, 0)
+#define PCS_PMA_RX_FLL_B 0x019c
+#define PCS_PMA_LOAD_EN BIT(0)
+#define PCS_PMA_SW_RST_SET 0x0460
+#define PCS_PMA_SW_REF_RST_N BIT(5)
+#define PCS_PMA_PXP_CDR_PR_IDAC 0x0794
+#define PCS_PMA_FORCE_SEL_CDR_PR_IDAC BIT(16)
+#define PCS_PMA_FORCE_CDR_PR_IDAC GENMASK(10, 0)
+#define PCS_PMA_PXP_CDR_PR_LPF_C_EN 0x0820
+#define PCS_PMA_FORCE_SEL_CDR_PR_LPF_R_EN BIT(24)
+#define PCS_PMA_FORCE_CDR_PR_LPF_R_EN BIT(16)
+#define PCS_PMA_FORCE_SEL_CDR_PR_LPF_C_EN BIT(8)
+#define PCS_PMA_FORCE_CDR_PR_LPF_C_EN BIT(0)
+#define PCS_PMA_PXP_CDR_PR_PWDB 0x0824
+#define PCS_PMA_FORCE_SEL_CDR_PR_PWDB BIT(24)
+#define PCS_PMA_FORCE_CDR_PR_PWDB BIT(16)
+#define PCS_PMA_FORCE_SEL_CDR_PR_PIEYE_PWDB BIT(8)
+#define PCS_PMA_FORCE_CDR_PR_PIEYE_PWDB BIT(0)
+#define PCS_PMA_DIG_RESERVE_13 0x08bc
+#define PCS_PMA_FLL_IDAC_PCIEG1 GENMASK(10, 0)
+#define PCS_PMA_FLL_IDAC_PCIEG2 GENMASK(26, 16)
+#define PCS_PMA_DIG_RESERVE_14 0x08c0
+#define PCS_PMA_FLL_LOAD_EN BIT(16)
+#define PCS_PMA_FLL_LOAD_APPLY BIT(20)
+#define PCS_PMA_FREQLOCK_DET_EN GENMASK(2, 0)
+#define PCS_PMA_FREQLOCK_DET_NORMAL FIELD_PREP(PCS_PMA_FREQLOCK_DET_EN, 3)
+#define PCS_PMA_LOCK_CYCLECNT GENMASK(15, 0)
+#define PCS_PMA_UNLOCK_CYCLECNT GENMASK(31, 16)
+#define PCS_PMA_LOCK_TARGET_BEG GENMASK(15, 0)
+#define PCS_PMA_LOCK_TARGET_END GENMASK(31, 16)
+#define PCS_PMA_LOCK_LOCKTH GENMASK(11, 8)
+#define PCS_PMA_LOCK_UNLOCKTH GENMASK(15, 12)
+#define PCS_ANA_PCIE1_CDR_PR_INJ_MODE 0x01d4
+#define PCS_ANA_CDR_PR_INJ_FORCE_OFF BIT(24)
+
+#define AIROHA_PCIE1_PR_TARGET 0x9edf
+#define AIROHA_PCIE1_PR_RANGE 100
+#define AIROHA_PCIE1_PR_CYCLECNT 0x7fff
+#define AIROHA_PCIE1_PR_MAX_RETRIES 3
 
 /* SWITCH */
 #define SWITCH_CFC 0x04
@@ -299,6 +388,8 @@
 #define AIROHA_RECOVERY_MDIO_RETRY_US 1000
 #define AIROHA_RECOVERY_QDMA_STOP_TIMEOUT_US 50000
 #define AIROHA_RECOVERY_TX_TIMEOUT_US 5000
+#define AIROHA_DIAG_RX_WINDOW_SIZE 8
+#define AIROHA_PCS_PLL_SETTLE_MS 100
 
 /* FE */
 #define PSE_BASE 0x0100
@@ -468,6 +559,7 @@
 #define SP_CPORT_MASK(_n) GENMASK(3 + ((_n) << 2), ((_n) << 2))
 
 #define REG_SRC_PORT_FC_MAP6 0x2298
+#define FC_MAP6_DEF_VALUE 0x1b1a1918
 
 #define REG_FE_DBG_GDM4_TX_OK 0x2604
 #define REG_FE_DBG_GDM4_RX_BASE 0x2648
@@ -707,6 +799,13 @@ struct airoha_eth {
 	void __iomem *usb_pcs_hsgmii_pcs;
 	void __iomem *usb_pcs_hsgmii_rate_adp;
 	void __iomem *usb_pcs_phya;
+	void __iomem *pcie1_pcs_xfi_mac;
+	void __iomem *pcie1_pcs_multi_sgmii;
+	void __iomem *pcie1_pcs_usxgmii;
+	void __iomem *pcie1_pcs_hsgmii_rate_adp;
+	void __iomem *pcie1_pcs_xfi_ana;
+	void __iomem *pcie1_pcs_xfi_pma0;
+	void __iomem *pcie1_pcs_xfi_pma;
 
 	struct regmap *scu_regmap;
 	struct regmap *chip_scu_regmap;
@@ -714,12 +813,15 @@ struct airoha_eth {
 	struct udevice *switch_mdio_dev;
 	struct reset_ctl_bulk rsts;
 	struct reset_ctl_bulk xsi_rsts;
+	struct reset_ctl *gdm3_pcs_phy_rst;
+	struct reset_ctl *gdm3_pcs_mac_rst;
 	struct reset_ctl_bulk *gdm4_pcs_rsts;
 	struct reset_ctl_bulk *gdm4_usb_pcs_rsts;
 	struct reset_ctl switch_rst;
 	bool has_switch_rst;
 	struct phy_device *gdm4_phy;
 	ofnode gdm4_phy_node;
+	ofnode gdm3_phy_node;
 	struct phy_device *gdm4_usb_phy;
 	ofnode gdm4_usb_phy_node;
 	bool gdm4_usb_hsgmii;
@@ -732,6 +834,10 @@ struct airoha_eth {
 	u8 gdm4_usb_tx_channel;
 	u8 gdm4_usb_phy_addr;
 	u8 gdm4_usb_fragment;
+	u8 gdm3_src_port;
+	u8 gdm3_tx_channel;
+	u8 gdm3_nboq;
+	u8 gdm3_phy_addr;
 	u8 default_tx_fport;
 	u8 last_tx_fport;
 	u8 last_rx_fport;
@@ -739,6 +845,13 @@ struct airoha_eth {
 	bool gdm4_link_up;
 	bool gdm4_usb_pcs_ready;
 	bool gdm4_usb_link_up;
+	bool gdm3_link_up;
+	bool gdm3_pcs_ready;
+	bool gdm3_pcs_reset_done;
+	u16 gdm3_pcs_ana_ops;
+	u16 gdm3_pcs_ana_fields;
+	u16 gdm3_pcs_ana_bad_reg;
+	u32 gdm3_pcs_ana_bad_bits;
 	bool rtl8261_init_done;
 	bool rtl8261_phy5_pnswap_tx;
 	bool rtl8261_phy5_pnswap_rx;
@@ -763,6 +876,10 @@ struct airoha_eth {
 	u16 last_tx_ethertype;
 	u16 last_tx_len;
 	u8 last_tx_hw_fport;
+	u8 last_tx_qdma;
+	u8 last_tx_qid;
+	u32 last_tx_msg0;
+	u32 last_tx_msg1;
 	int last_tx_ret;
 	u8 peer_fport_next;
 	struct airoha_peer_fport peer_fport[AIROHA_PEER_FPORT_CACHE_SIZE];
@@ -854,6 +971,8 @@ enum {
 #define RTL8261_MMD_VEND2 31
 #define RTL8261_PHY_CHIP_ID 0x0104
 #define RTL8261_PHY_EXT_RESET 0x0145
+#define RTL8261_PHY_IRQ_ENABLE 0x00e1
+#define RTL8261_PHY_VEND2_INER 0xa424
 #define RTL8261_PHY_SDS_DATA 0x0141
 #define RTL8261_PHY_SDS_RD_WR 0x0142
 #define RTL8261_PHY_SDS_CMD 0x0143
@@ -927,7 +1046,7 @@ typedef struct rtk_hwpatch_s {
 	u16 sram_a;
 } rtk_hwpatch_t;
 
-#include "rtl8261be_patch_table.inc"
+#include "rtl8261be_patch_table-stock-v28.inc"
 
 static const char *const en7523_xsi_rsts_names[] = {
 	"hsi0-mac",
@@ -937,6 +1056,7 @@ static const char *const en7523_xsi_rsts_names[] = {
 
 static const char *const en7581_xsi_rsts_names[] = {
 	"hsi0-mac",
+	"hsi1-phy",
 	"hsi1-mac",
 	"hsi-mac",
 	"xfp-mac",
@@ -958,6 +1078,50 @@ static u32 airoha_rmw(void __iomem *base, u32 offset, u32 mask, u32 val)
 	airoha_wr(base, offset, val);
 
 	return val;
+}
+
+static u32 airoha_phya_rmw(struct airoha_eth *eth, bool pcie1_lane1,
+			   void __iomem *base, u32 offset, u32 mask, u32 val)
+{
+	u32 touched = mask | val;
+	u32 mapped = 0;
+	u32 result = 0;
+	size_t i;
+
+	if (!pcie1_lane1 || base != eth->eth_pcs_xfi_ana)
+		return airoha_rmw(base, offset, mask, val);
+
+	eth->gdm3_pcs_ana_ops++;
+	for (i = 0; i < ARRAY_SIZE(an7581_pcie1_ana_map); i++) {
+		const struct an7581_pcie1_ana_field_map *field =
+			&an7581_pcie1_ana_map[i];
+		u32 src_mask, dst_mask, dst_val;
+
+		if (field->src_reg < offset)
+			continue;
+		if (field->src_reg > offset)
+			break;
+
+		src_mask = GENMASK(field->src_lsb + field->width - 1,
+				   field->src_lsb);
+		if (!(touched & src_mask))
+			continue;
+
+		dst_mask = ((mask & src_mask) >> field->src_lsb) <<
+			   field->dst_lsb;
+		dst_val = ((val & src_mask) >> field->src_lsb) <<
+			  field->dst_lsb;
+		result = airoha_rmw(base, field->dst_reg, dst_mask, dst_val);
+		mapped |= touched & src_mask;
+		eth->gdm3_pcs_ana_fields++;
+	}
+
+	if (touched & ~mapped) {
+		eth->gdm3_pcs_ana_bad_reg = offset;
+		eth->gdm3_pcs_ana_bad_bits |= touched & ~mapped;
+	}
+
+	return result;
 }
 
 static void airoha_eth_gdm4_set_speed_mode(struct airoha_eth *eth, u32 mode,
@@ -1026,6 +1190,11 @@ static u32 airoha_gdm4_vip_mask(struct airoha_eth *eth)
 	return mask;
 }
 
+static u32 airoha_gdm3_vip_mask(struct airoha_eth *eth)
+{
+	return BIT(eth->gdm3_src_port & 0x1f);
+}
+
 static bool airoha_is_external_phy_addr(struct airoha_eth *eth, int phy_addr)
 {
 	if (airoha_rtl8261_is_phy_addr(phy_addr))
@@ -1069,10 +1238,21 @@ static uintptr_t airoha_gpio_dir_reg(u32 gpio)
 static void airoha_gpio_direction_output(u32 gpio)
 {
 	u32 bank_bit = BIT(gpio % 32);
-	u32 dir_bit = BIT(2 * (gpio % 16));
+	u32 field_shift = 2 * (gpio % 16);
+	u32 dir_mask = GENMASK(field_shift + 1, field_shift);
 
 	airoha_clrsetbits_le32(airoha_gpio_oe_reg(gpio), 0, bank_bit);
-	airoha_clrsetbits_le32(airoha_gpio_dir_reg(gpio), 0, dir_bit);
+	airoha_clrsetbits_le32(airoha_gpio_dir_reg(gpio), dir_mask,
+			       BIT(field_shift));
+}
+
+static void airoha_force_gpio(struct airoha_eth *eth, u32 gpio)
+{
+	if (!eth->chip_scu_regmap || gpio >= 32)
+		return;
+
+	regmap_update_bits(eth->chip_scu_regmap, SCU_FORCE_GPIO_EN,
+			   BIT(gpio), BIT(gpio));
 }
 
 static void airoha_gpio_set_active_low(u32 gpio, int active)
@@ -1114,20 +1294,76 @@ static void __iomem *airoha_map_pcs_resource(ofnode node, const char *name)
 static int airoha_eth_gdm4_parse_config(struct udevice *dev,
 					struct airoha_eth *eth)
 {
-	ofnode gdm4_node, pcs_node, phy_node, secondary_pcs, secondary_phy;
+	ofnode gdm4_node, gdm3_node, pcs_node, phy_node, secondary_pcs, secondary_phy;
+	struct ofnode_phandle_args pcs_args;
 	u32 phy_addr;
+	int ret;
 	bool usb_primary = false;
 
 	eth->gdm4_src_port = HSGMII_LAN_7581_ETH_SRCPORT;
-	eth->gdm4_tx_channel = 0;
+	eth->gdm4_tx_channel = 13;
 	eth->gdm4_phy_addr = RTL8261_PHY5_ADDR;
 	eth->gdm4_fragment = 31;
 	eth->gdm4_phy_node = ofnode_null();
 	eth->gdm4_usb_src_port = HSGMII_LAN_7581_USB_SRCPORT;
 	eth->gdm4_usb_tx_channel = 12;
 	eth->gdm4_usb_fragment = 4;
-	eth->gdm4_usb_phy_addr = 13;
+	eth->gdm4_usb_phy_addr = 15;
 	eth->gdm4_usb_phy_node = ofnode_null();
+	eth->gdm3_src_port = HSGMII_LAN_7581_PCIE1_SRCPORT;
+	eth->gdm3_tx_channel = 11;
+	eth->gdm3_nboq = 5;
+	eth->gdm3_phy_addr = RTL8261_PHY8_ADDR;
+	eth->gdm3_phy_node = ofnode_null();
+
+	gdm3_node = ofnode_find_subnode(dev_ofnode(dev), "ethernet@3");
+	if (ofnode_valid(gdm3_node)) {
+		eth->gdm3_src_port = ofnode_read_u32_default(gdm3_node,
+							     "airoha,source-port",
+							     HSGMII_LAN_7581_PCIE1_SRCPORT);
+		eth->gdm3_tx_channel = ofnode_read_u32_default(gdm3_node,
+							       "airoha,tx-channel", 11);
+		eth->gdm3_nboq = ofnode_read_u32_default(gdm3_node,
+							  "airoha,nboq", 5);
+		phy_node = ofnode_parse_phandle(gdm3_node, "phy-handle", 0);
+		if (ofnode_valid(phy_node) &&
+		    !ofnode_read_u32(phy_node, "reg", &phy_addr)) {
+			eth->gdm3_phy_addr = phy_addr;
+			eth->gdm3_phy_node = phy_node;
+		}
+
+		/* The PCIe PCS is a two-lane shared block. Select lane 1 for
+		 * GDM3/PCIe1 and map that lane's resources explicitly. PMA0 owns
+		 * the shared PLLs while PMA1 owns lane 1 TX/RX/CDR state.
+		 */
+		ret = ofnode_parse_phandle_with_args(gdm3_node, "pcs", NULL, 1,
+						     0, &pcs_args);
+		if (ret || pcs_args.args_count != 1 || pcs_args.args[0] > 1)
+			return ret ? ret : -EINVAL;
+		if (pcs_args.args[0] != 1)
+			return -EINVAL;
+		pcs_node = pcs_args.node;
+		eth->pcie1_pcs_xfi_mac = airoha_map_pcs_resource(pcs_node,
+								"pcs_mac1");
+		eth->pcie1_pcs_multi_sgmii = airoha_map_pcs_resource(pcs_node,
+								    "multi_sgmii1");
+		eth->pcie1_pcs_usxgmii = airoha_map_pcs_resource(pcs_node,
+								 "usxgmii1");
+		eth->pcie1_pcs_hsgmii_rate_adp =
+			airoha_map_pcs_resource(pcs_node, "hsgmii_rate_adp1");
+		eth->pcie1_pcs_xfi_ana = airoha_map_pcs_resource(pcs_node,
+								 "pcs_ana");
+		eth->pcie1_pcs_xfi_pma0 = airoha_map_pcs_resource(pcs_node,
+								  "pcs_pma0");
+		eth->pcie1_pcs_xfi_pma = airoha_map_pcs_resource(pcs_node,
+								 "pcs_pma1");
+		if (!eth->pcie1_pcs_xfi_mac || !eth->pcie1_pcs_multi_sgmii ||
+		    !eth->pcie1_pcs_usxgmii || !eth->pcie1_pcs_hsgmii_rate_adp ||
+		    !eth->pcie1_pcs_xfi_ana || !eth->pcie1_pcs_xfi_pma0 ||
+		    !eth->pcie1_pcs_xfi_pma)
+			return -ENOMEM;
+
+	}
 
 	gdm4_node = ofnode_find_subnode(dev_ofnode(dev), "ethernet@4");
 	if (!ofnode_valid(gdm4_node))
@@ -1505,13 +1741,221 @@ static void airoha_eth_gdm4_cdr_reset(struct airoha_eth *eth)
 	airoha_rmw(pma, 0x818, BIT(24) | BIT(8), 0);
 }
 
-static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth)
+static u32 airoha_eth_gdm3_pr_apply_idac(void __iomem *pma, u32 idac)
+{
+	airoha_rmw(pma, PCS_PMA_PXP_CDR_PR_IDAC,
+		   PCS_PMA_FORCE_CDR_PR_IDAC,
+		   FIELD_PREP(PCS_PMA_FORCE_CDR_PR_IDAC, idac));
+	airoha_rmw(pma, PCS_PMA_SS_RX_FREQ_DET_4,
+		   PCS_PMA_FREQLOCK_DET_EN, 0);
+	airoha_rmw(pma, PCS_PMA_SS_RX_FREQ_DET_4,
+		   PCS_PMA_FREQLOCK_DET_EN, PCS_PMA_FREQLOCK_DET_NORMAL);
+	mdelay(10);
+
+	return airoha_rr(pma, PCS_PMA_RX_FREQDET) >> 16;
+}
+
+static u32 airoha_eth_abs_diff(u32 a, u32 b)
+{
+	return a > b ? a - b : b - a;
+}
+
+static u32 airoha_eth_gdm3_pr_find_idac(void __iomem *pma, u32 *fl_out)
+{
+	u32 best_diff = ~0U;
+	u32 best_fl_out = 0;
+	u32 best_idac = 0;
+	u32 upper_fl_out;
+	u32 upper_idac;
+	int bit;
+	u32 i;
+
+	for (i = 0; i < 8; i++) {
+		u32 idac = i << 8;
+		u32 sample = airoha_eth_gdm3_pr_apply_idac(pma, idac);
+		u32 diff = airoha_eth_abs_diff(sample, AIROHA_PCIE1_PR_TARGET);
+
+		if (diff < best_diff) {
+			best_diff = diff;
+			best_fl_out = sample;
+			best_idac = idac;
+		}
+	}
+
+	/*
+	 * FL_OUT decreases as IDAC increases. Start from the closest major
+	 * value that is still above the target, then find the crossing one bit
+	 * at a time. A closest-only greedy search can select bit 7 too early
+	 * and can no longer test combinations such as 0x4f9.
+	 */
+	upper_idac = best_idac;
+	upper_fl_out = best_fl_out;
+	if (upper_fl_out < AIROHA_PCIE1_PR_TARGET && upper_idac >= BIT(8)) {
+		u32 idac = upper_idac - BIT(8);
+		u32 sample = airoha_eth_gdm3_pr_apply_idac(pma, idac);
+
+		if (sample >= AIROHA_PCIE1_PR_TARGET) {
+			upper_idac = idac;
+			upper_fl_out = sample;
+		}
+	}
+
+	if (upper_fl_out >= AIROHA_PCIE1_PR_TARGET) {
+		for (bit = 7; bit >= 0; bit--) {
+			u32 idac = upper_idac | BIT(bit);
+			u32 sample = airoha_eth_gdm3_pr_apply_idac(pma, idac);
+
+			if (sample >= AIROHA_PCIE1_PR_TARGET) {
+				upper_idac = idac;
+				upper_fl_out = sample;
+			}
+		}
+
+		best_idac = upper_idac;
+		best_fl_out = upper_fl_out;
+		best_diff = airoha_eth_abs_diff(best_fl_out,
+						AIROHA_PCIE1_PR_TARGET);
+		if (best_idac < FIELD_MAX(PCS_PMA_FORCE_CDR_PR_IDAC)) {
+			u32 idac = best_idac + 1;
+			u32 sample = airoha_eth_gdm3_pr_apply_idac(pma, idac);
+			u32 diff = airoha_eth_abs_diff(sample,
+						 AIROHA_PCIE1_PR_TARGET);
+
+			if (diff < best_diff) {
+				best_idac = idac;
+				best_fl_out = sample;
+			}
+		}
+	}
+
+	*fl_out = best_fl_out;
+	return best_idac;
+}
+
+static bool airoha_eth_gdm3_pr_calibrate(struct airoha_eth *eth, int attempt)
+{
+	void __iomem *ana = eth->pcie1_pcs_xfi_ana;
+	void __iomem *pma = eth->pcie1_pcs_xfi_pma;
+	u32 target_beg = AIROHA_PCIE1_PR_TARGET - AIROHA_PCIE1_PR_RANGE;
+	u32 target_end = AIROHA_PCIE1_PR_TARGET + AIROHA_PCIE1_PR_RANGE;
+	u32 reset_mask = GENMASK(11, 0);
+	u32 idac, fl_out, freqdet;
+	bool calibrated;
+
+	/* Enter the same injection/FMeter mode used by RX_PRCal(). */
+	airoha_rmw(pma, PCS_PMA_SW_RST_SET, 0, PCS_PMA_SW_REF_RST_N);
+	udelay(100);
+	airoha_rmw(pma, PCS_PMA_RX_CTRL_SEQUENCE_DISB_CTRL_1, BIT(0), 0);
+	airoha_rmw(pma, PCS_PMA_SS_RX_FREQ_DET_2, GENMASK(31, 0),
+		   FIELD_PREP(PCS_PMA_LOCK_TARGET_END, target_end) |
+		   FIELD_PREP(PCS_PMA_LOCK_TARGET_BEG, target_beg));
+	airoha_rmw(pma, PCS_PMA_SS_RX_FREQ_DET_1, GENMASK(31, 0),
+		   FIELD_PREP(PCS_PMA_UNLOCK_CYCLECNT,
+			      AIROHA_PCIE1_PR_CYCLECNT) |
+		   FIELD_PREP(PCS_PMA_LOCK_CYCLECNT,
+			      AIROHA_PCIE1_PR_CYCLECNT));
+	airoha_rmw(pma, PCS_PMA_SS_RX_FREQ_DET_3, GENMASK(31, 0),
+		   FIELD_PREP(PCS_PMA_LOCK_TARGET_END, target_end) |
+		   FIELD_PREP(PCS_PMA_LOCK_TARGET_BEG, target_beg));
+	airoha_rmw(pma, PCS_PMA_SS_RX_FREQ_DET_4,
+		   PCS_PMA_LOCK_UNLOCKTH | PCS_PMA_LOCK_LOCKTH,
+		   FIELD_PREP(PCS_PMA_LOCK_UNLOCKTH, 3) |
+		   FIELD_PREP(PCS_PMA_LOCK_LOCKTH, 3));
+
+	airoha_rmw(ana, PCS_ANA_PCIE1_CDR_PR_INJ_MODE, 0,
+		   PCS_ANA_CDR_PR_INJ_FORCE_OFF);
+	airoha_rmw(pma, PCS_PMA_PXP_CDR_PR_LPF_C_EN,
+		   PCS_PMA_FORCE_CDR_PR_LPF_C_EN,
+		   PCS_PMA_FORCE_SEL_CDR_PR_LPF_R_EN |
+		   PCS_PMA_FORCE_CDR_PR_LPF_R_EN |
+		   PCS_PMA_FORCE_SEL_CDR_PR_LPF_C_EN);
+	airoha_rmw(pma, PCS_PMA_PXP_CDR_PR_IDAC, 0,
+		   PCS_PMA_FORCE_SEL_CDR_PR_IDAC);
+	airoha_rmw(pma, PCS_PMA_PXP_CDR_PR_PWDB,
+		   PCS_PMA_FORCE_CDR_PR_PWDB,
+		   PCS_PMA_FORCE_SEL_CDR_PR_PWDB);
+	airoha_rmw(pma, PCS_PMA_PXP_CDR_PR_PWDB, 0,
+		   PCS_PMA_FORCE_CDR_PR_PWDB);
+
+	idac = airoha_eth_gdm3_pr_find_idac(pma, &fl_out);
+	fl_out = airoha_eth_gdm3_pr_apply_idac(pma, idac);
+
+	/* Load the calibrated band, then return the PR controls to auto mode. */
+	airoha_rmw(ana, PCS_ANA_PCIE1_CDR_PR_INJ_MODE,
+		   PCS_ANA_CDR_PR_INJ_FORCE_OFF, 0);
+	airoha_rmw(pma, PCS_PMA_PXP_CDR_PR_LPF_C_EN,
+		   PCS_PMA_FORCE_SEL_CDR_PR_LPF_R_EN |
+			   PCS_PMA_FORCE_SEL_CDR_PR_LPF_C_EN |
+			   PCS_PMA_FORCE_CDR_PR_LPF_C_EN,
+		   0);
+	airoha_rmw(pma, PCS_PMA_PXP_CDR_PR_IDAC,
+		   PCS_PMA_FORCE_SEL_CDR_PR_IDAC, 0);
+	airoha_rmw(pma, PCS_PMA_DIG_RESERVE_13,
+		   PCS_PMA_FLL_IDAC_PCIEG1 | PCS_PMA_FLL_IDAC_PCIEG2,
+		   FIELD_PREP(PCS_PMA_FLL_IDAC_PCIEG1, idac) |
+			   FIELD_PREP(PCS_PMA_FLL_IDAC_PCIEG2, idac));
+	airoha_rmw(pma, PCS_PMA_DIG_RESERVE_14, 0,
+		   PCS_PMA_FLL_LOAD_EN);
+	/* The PCIe load-K flow latches the Gen1/Gen2 bands on a bit20
+	 * low-to-high transition after programming DIG_RESERVE_13.
+	 */
+	airoha_rmw(pma, PCS_PMA_DIG_RESERVE_14,
+		   PCS_PMA_FLL_LOAD_APPLY, 0);
+	udelay(10);
+	airoha_rmw(pma, PCS_PMA_DIG_RESERVE_14, 0,
+		   PCS_PMA_FLL_LOAD_APPLY);
+	/* The PCIe SDK also loads the calibrated IDAC into the RX FLL
+	 * low-path and arms the FLL band's load latch. Without these writes
+	 * DIG_RESERVE_13 changes are visible in diagnostics but are not used
+	 * by the lane's CDR.
+	 */
+	airoha_rmw(pma, PCS_PMA_RX_FLL_B, 0, PCS_PMA_LOAD_EN);
+	airoha_rmw(pma, PCS_PMA_RX_FLL_1, PCS_PMA_LPATH_IDAC,
+		   FIELD_PREP(PCS_PMA_LPATH_IDAC, idac));
+	airoha_rmw(pma, PCS_PMA_PXP_CDR_PR_PWDB,
+		   PCS_PMA_FORCE_CDR_PR_PWDB, 0);
+	airoha_rmw(pma, PCS_PMA_PXP_CDR_PR_PWDB, 0,
+		   PCS_PMA_FORCE_CDR_PR_PWDB);
+	airoha_rmw(pma, PCS_PMA_PXP_CDR_PR_PWDB,
+		   PCS_PMA_FORCE_SEL_CDR_PR_PWDB |
+			   PCS_PMA_FORCE_SEL_CDR_PR_PIEYE_PWDB |
+			   PCS_PMA_FORCE_CDR_PR_PIEYE_PWDB,
+		   0);
+	airoha_rmw(pma, PCS_PMA_SW_RST_SET, PCS_PMA_SW_REF_RST_N, 0);
+	udelay(100);
+	calibrated = airoha_eth_abs_diff(fl_out,
+					 AIROHA_PCIE1_PR_TARGET) <=
+		     AIROHA_PCIE1_PR_RANGE;
+
+	airoha_eth_gdm4_cdr_reset(eth);
+	airoha_rmw(pma, PCS_PMA_SW_RST_SET, reset_mask, PCS_PMA_SW_REF_RST_N);
+	udelay(100);
+	airoha_rmw(pma, PCS_PMA_SW_RST_SET, 0, reset_mask);
+	mdelay(5);
+	airoha_eth_gdm4_cdr_reset(eth);
+	mdelay(5);
+
+	freqdet = airoha_rr(pma, PCS_PMA_RX_FREQDET);
+	printf("gdm3-pcie1: PR calibration try=%d idac=%03x fl_out=%04x freqdet=%08x\n",
+	       attempt, idac, fl_out, freqdet);
+
+	return calibrated;
+}
+
+static void airoha_eth_phya_init(struct airoha_eth *eth, bool pcie1_lane1)
 {
 	void __iomem *ana = eth->eth_pcs_xfi_ana;
 	void __iomem *pma = eth->eth_pcs_xfi_pma;
+	void __iomem *pll_pma = pcie1_lane1 ? eth->pcie1_pcs_xfi_pma0 : pma;
 
-	if (!ana || !pma)
+	if (!ana || !pma || !pll_pma)
 		return;
+
+	/* Route shared-PHYA accesses through the lane-aware field mapper. PCIe
+	 * shared PLL PMA writes use PMA0; lane TX/RX/CDR writes use PMA1.
+	 */
+#define airoha_rmw(base, offset, mask, val) \
+	airoha_phya_rmw(eth, pcie1_lane1, base, offset, mask, val)
 
 	/* Enable analog common lane. */
 	airoha_rmw(ana, 0x0, 0, BIT(0));
@@ -1522,7 +1966,7 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth)
 		   FIELD_PREP(GENMASK(15, 8), BIT(5)));
 	airoha_rmw(ana, 0x1c, GENMASK(2, 0), FIELD_PREP(GENMASK(2, 0), 0x4));
 	airoha_rmw(ana, 0x1c, 0, BIT(8));
-	airoha_rmw(pma, 0x828, BIT(24) | BIT(16), BIT(24));
+	airoha_rmw(pll_pma, 0x828, BIT(24) | BIT(16), BIT(24));
 	airoha_rmw(ana, 0x1c, GENMASK(25, 24) | BIT(16), 0);
 	airoha_rmw(ana, 0x20,
 		   BIT(24) | GENMASK(17, 16) | GENMASK(9, 8) | BIT(0),
@@ -1552,9 +1996,9 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth)
 		   FIELD_PREP(GENMASK(10, 8), 0x0) |
 			   FIELD_PREP(GENMASK(5, 3), 0x3) |
 			   FIELD_PREP(GENMASK(2, 0), 0x3));
-	airoha_rmw(pma, 0x800, GENMASK(30, 0),
+	airoha_rmw(pll_pma, 0x800, GENMASK(30, 0),
 		   FIELD_PREP(GENMASK(30, 0), 0x25800000));
-	airoha_rmw(pma, 0x79c, 0, BIT(16));
+	airoha_rmw(pll_pma, 0x79c, 0, BIT(16));
 	airoha_rmw(ana, 0x14, BIT(24) | GENMASK(1, 0), 0);
 	airoha_rmw(ana, 0x2c, GENMASK(1, 0), 0);
 	airoha_rmw(ana, 0x10, GENMASK(17, 16) | GENMASK(9, 8) | GENMASK(1, 0),
@@ -1571,8 +2015,8 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth)
 			   FIELD_PREP(GENMASK(18, 16), 0x1) | BIT(8));
 	airoha_rmw(ana, 0x28, GENMASK(26, 24) | BIT(16),
 		   FIELD_PREP(GENMASK(26, 24), 0x1) | BIT(16));
-	airoha_rmw(pma, 0x828, 0, BIT(16));
-	airoha_rmw(pma, 0x828, 0, BIT(8) | BIT(0));
+	airoha_rmw(pll_pma, 0x828, 0, BIT(16));
+	airoha_rmw(pll_pma, 0x828, 0, BIT(8) | BIT(0));
 
 	udelay(300);
 
@@ -1583,7 +2027,7 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth)
 	airoha_rmw(ana, 0x64,
 		   BIT(24) | GENMASK(18, 16) | GENMASK(9, 8) | BIT(0),
 		   BIT(24) | FIELD_PREP(GENMASK(18, 16), 0x4) | BIT(0));
-	airoha_rmw(pma, 0x854, BIT(24) | BIT(16), BIT(24));
+	airoha_rmw(pll_pma, 0x854, BIT(24) | BIT(16), BIT(24));
 	airoha_rmw(ana, 0x68,
 		   GENMASK(25, 24) | BIT(16) | GENMASK(9, 8) | BIT(0),
 		   FIELD_PREP(GENMASK(25, 24), 0x0));
@@ -1614,9 +2058,9 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth)
 			   FIELD_PREP(GENMASK(26, 24), 0x4) |
 			   FIELD_PREP(GENMASK(18, 16), 0x4) |
 			   FIELD_PREP(GENMASK(10, 8), 0x7) | BIT(0));
-	airoha_rmw(pma, 0x798, GENMASK(30, 0),
+	airoha_rmw(pll_pma, 0x798, GENMASK(30, 0),
 		   FIELD_PREP(GENMASK(30, 0), BIT(27) | BIT(22)));
-	airoha_rmw(pma, 0x794, 0, BIT(24));
+	airoha_rmw(pll_pma, 0x794, 0, BIT(24));
 	airoha_rmw(ana, 0x58,
 		   GENMASK(25, 24) | GENMASK(17, 16) | GENMASK(10, 8) |
 			   GENMASK(7, 0),
@@ -1634,10 +2078,15 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth)
 			   FIELD_PREP(GENMASK(2, 0), 0x3));
 	airoha_rmw(ana, 0x74, GENMASK(10, 8) | BIT(0), BIT(0));
 	airoha_rmw(ana, 0x6c, 0, BIT(24));
-	airoha_rmw(pma, 0x854, 0, BIT(16));
-	airoha_rmw(pma, 0x854, 0, BIT(8) | BIT(0));
+	airoha_rmw(pll_pma, 0x854, 0, BIT(16));
+	airoha_rmw(pll_pma, 0x854, 0, BIT(8) | BIT(0));
 
 	udelay(300);
+	/* Linux waits for the shared JCPLL/TXPLL pair to settle before
+	 * programming per-lane TX/RX state. This is especially important for
+	 * PCIe lane 1, which consumes the PLLs owned by PMA0.
+	 */
+	mdelay(AIROHA_PCS_PLL_SETTLE_MS);
 
 	/* TX path setup. */
 	airoha_rmw(pma, 0x580, GENMASK(1, 0),
@@ -1782,6 +2231,43 @@ static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth)
 			   BIT(5) | BIT(4) | BIT(3) | BIT(2) | BIT(1) | BIT(0));
 	udelay(7000);
 	airoha_eth_gdm4_cdr_reset(eth);
+
+#undef airoha_rmw
+}
+
+static void airoha_eth_gdm4_phya_init(struct airoha_eth *eth)
+{
+	airoha_eth_phya_init(eth, false);
+}
+
+static int airoha_eth_gdm3_phya_init(struct airoha_eth *eth)
+{
+	bool locked = false;
+	int attempt;
+
+	eth->gdm3_pcs_ana_ops = 0;
+	eth->gdm3_pcs_ana_fields = 0;
+	eth->gdm3_pcs_ana_bad_reg = 0;
+	eth->gdm3_pcs_ana_bad_bits = 0;
+
+	airoha_eth_phya_init(eth, true);
+	for (attempt = 1; attempt <= AIROHA_PCIE1_PR_MAX_RETRIES; attempt++) {
+		locked = airoha_eth_gdm3_pr_calibrate(eth, attempt);
+		if (locked)
+			break;
+	}
+	if (!locked)
+		printf("gdm3-pcie1: PR calibration missed target after %d tries\n",
+		       AIROHA_PCIE1_PR_MAX_RETRIES);
+
+	if (eth->gdm3_pcs_ana_bad_bits) {
+		printf("gdm3-pcie1: PHYA field map missed reg %03x bits %08x\n",
+		       eth->gdm3_pcs_ana_bad_reg,
+		       eth->gdm3_pcs_ana_bad_bits);
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 static int airoha_eth_gdm4_pcs_init(struct airoha_eth *eth)
@@ -1853,6 +2339,122 @@ static int airoha_eth_gdm4_pcs_init(struct airoha_eth *eth)
 	airoha_eth_pcs_post_config_ep(eth->usb_pcs_xfi_mac,
 				      eth->gdm4_usb_fragment);
 	eth->gdm4_usb_pcs_ready = true;
+
+	return 0;
+}
+
+static void airoha_eth_gdm3_restore_pcs(struct airoha_eth *eth,
+					 void __iomem *xfi_mac,
+					 void __iomem *multi_sgmii,
+					 void __iomem *usxgmii,
+					 void __iomem *rate_adp,
+					 void __iomem *xfi_ana,
+					 void __iomem *xfi_pma)
+{
+	eth->eth_pcs_xfi_mac = xfi_mac;
+	eth->eth_pcs_multi_sgmii = multi_sgmii;
+	eth->eth_pcs_usxgmii = usxgmii;
+	eth->eth_pcs_hsgmii_rate_adp = rate_adp;
+	eth->eth_pcs_xfi_ana = xfi_ana;
+	eth->eth_pcs_xfi_pma = xfi_pma;
+}
+
+static int airoha_eth_gdm3_reset_pulse(struct airoha_eth *eth)
+{
+	int ret;
+
+	if (!eth->gdm3_pcs_phy_rst || !eth->gdm3_pcs_mac_rst)
+		return -ENODEV;
+
+	ret = reset_assert(eth->gdm3_pcs_phy_rst);
+	if (ret)
+		return ret;
+
+	ret = reset_assert(eth->gdm3_pcs_mac_rst);
+	if (ret) {
+		reset_deassert(eth->gdm3_pcs_phy_rst);
+		return ret;
+	}
+
+	udelay(10);
+
+	ret = reset_deassert(eth->gdm3_pcs_phy_rst);
+	if (ret) {
+		reset_deassert(eth->gdm3_pcs_mac_rst);
+		return ret;
+	}
+
+	ret = reset_deassert(eth->gdm3_pcs_mac_rst);
+	if (ret)
+		return ret;
+
+	eth->gdm3_pcs_reset_done = true;
+
+	return 0;
+}
+
+static int airoha_eth_gdm3_pcs_init(struct airoha_eth *eth)
+{
+	void __iomem *xfi_mac, *multi_sgmii, *usxgmii, *rate_adp;
+	void __iomem *xfi_ana, *xfi_pma;
+	int ret;
+
+	if (eth->gdm3_pcs_ready)
+		return 0;
+	if (!eth->pcie1_pcs_xfi_mac || !eth->pcie1_pcs_multi_sgmii ||
+	    !eth->pcie1_pcs_usxgmii || !eth->pcie1_pcs_hsgmii_rate_adp ||
+	    !eth->pcie1_pcs_xfi_ana || !eth->pcie1_pcs_xfi_pma0 ||
+	    !eth->pcie1_pcs_xfi_pma)
+		return -ENODEV;
+
+	/* Match the stock PCIe1 xsgmii_chg() handoff before PHYA setup. */
+	if (eth->scu_regmap) {
+		regmap_update_bits(eth->scu_regmap, SCU_SSTR,
+				   SCU_PCIE1_XSI_SEL, SCU_PCIE1_XSI_USXGMII);
+		regmap_update_bits(eth->scu_regmap, SCU_PCIC,
+				   SCU_PCIC_PCIE_MODE, 0);
+	}
+
+	ret = airoha_eth_gdm3_reset_pulse(eth);
+	if (ret)
+		return ret;
+
+	/* The existing AN7581 sequence is endpoint-generic. Temporarily point
+	 * its register context at PCIe1, then restore the GDM4 context. */
+	xfi_mac = eth->eth_pcs_xfi_mac;
+	multi_sgmii = eth->eth_pcs_multi_sgmii;
+	usxgmii = eth->eth_pcs_usxgmii;
+	rate_adp = eth->eth_pcs_hsgmii_rate_adp;
+	xfi_ana = eth->eth_pcs_xfi_ana;
+	xfi_pma = eth->eth_pcs_xfi_pma;
+	eth->eth_pcs_xfi_mac = eth->pcie1_pcs_xfi_mac;
+	eth->eth_pcs_multi_sgmii = eth->pcie1_pcs_multi_sgmii;
+	eth->eth_pcs_usxgmii = eth->pcie1_pcs_usxgmii;
+	eth->eth_pcs_hsgmii_rate_adp = eth->pcie1_pcs_hsgmii_rate_adp;
+	eth->eth_pcs_xfi_ana = eth->pcie1_pcs_xfi_ana;
+	eth->eth_pcs_xfi_pma = eth->pcie1_pcs_xfi_pma;
+
+	airoha_eth_pcs_pre_config(eth);
+	ret = airoha_eth_gdm3_phya_init(eth);
+	if (ret) {
+		airoha_eth_gdm3_restore_pcs(eth, xfi_mac, multi_sgmii, usxgmii,
+						 rate_adp, xfi_ana, xfi_pma);
+		return ret;
+	}
+	/* Stock xSGMII_Solution(3) clears both PCH modes before enabling the
+	 * PCIe1 rate adapter, leaving CTRL0 at 0x11 after USXGMII setup. */
+	airoha_rmw(eth->eth_pcs_hsgmii_rate_adp,
+		   PCS_HSGMII_RATE_ADAPT_CTRL_0,
+		   PCS_HSGMII_RATE_ADAPT_TX_USXGMII_PCH_MODE |
+			   PCS_HSGMII_RATE_ADAPT_RX_USXGMII_PCH_MODE,
+		   0);
+	airoha_eth_pcs_init_usxgmii(eth);
+	airoha_eth_pcs_interrupt_init_usxgmii(eth);
+	airoha_eth_pcs_post_config_ep(eth->eth_pcs_xfi_mac, 31);
+	airoha_eth_gdm4_restart_an(eth);
+	airoha_eth_gdm3_restore_pcs(eth, xfi_mac, multi_sgmii, usxgmii,
+					 rate_adp, xfi_ana, xfi_pma);
+	eth->gdm3_pcs_ready = true;
 
 	return 0;
 }
@@ -2054,6 +2656,16 @@ static bool airoha_recovery_port_is_gdm4(struct airoha_eth *eth)
 			(eth->gdm4_dual_hsgmii && !strcmp(port, "lan3")));
 }
 
+static bool airoha_recovery_port_is_gdm3(struct airoha_eth *eth)
+{
+	const char *port = env_get("recovery_port");
+
+	(void)eth;
+
+	return port && (!strcmp(port, "3") || !strcmp(port, "pcie") ||
+			!strcmp(port, "pcie1") || !strcmp(port, "lan2"));
+}
+
 static bool airoha_recovery_port_is_gdm4_usb(struct airoha_eth *eth)
 {
 	const char *port = env_get("recovery_port");
@@ -2069,8 +2681,7 @@ static bool airoha_recovery_port_is_1g(struct airoha_eth *eth)
 
 	return port && (!strcmp(port, "1") || !strcmp(port, "1g") ||
 			!strcmp(port, "lan4") ||
-			(!eth->gdm4_dual_hsgmii &&
-			 (!strcmp(port, "lan2") || !strcmp(port, "lan3"))));
+			(!eth->gdm4_dual_hsgmii && !strcmp(port, "lan3")));
 }
 
 static bool airoha_recovery_dual_service_enabled(void)
@@ -2087,16 +2698,37 @@ static bool airoha_recovery_accept_gdm4_rx(struct airoha_eth *eth)
 	       airoha_recovery_dual_service_enabled();
 }
 
+static bool airoha_recovery_accept_gdm3_rx(struct airoha_eth *eth)
+{
+	return airoha_recovery_port_is_gdm3(eth) ||
+	       airoha_recovery_dual_service_enabled();
+}
+
 static bool airoha_fport_is_gdm4(u8 fport)
 {
 	return fport == AIROHA_FPORT_GDM4_ETH ||
 	       fport == AIROHA_FPORT_GDM4_USB;
 }
 
+static bool airoha_fport_is_gdm3(u8 fport)
+{
+	return fport == AIROHA_FPORT_GDM3_PCIE;
+}
+
+static bool airoha_fport_is_external_lan(u8 fport)
+{
+	return airoha_fport_is_gdm3(fport) || airoha_fport_is_gdm4(fport);
+}
+
 static bool airoha_sport_is_gdm4(struct airoha_eth *eth, u8 sport)
 {
 	return sport == eth->gdm4_src_port ||
 	       (eth->gdm4_dual_hsgmii && sport == eth->gdm4_usb_src_port);
+}
+
+static bool airoha_sport_is_gdm3(struct airoha_eth *eth, u8 sport)
+{
+	return sport == eth->gdm3_src_port;
 }
 
 static bool airoha_eth_is_broadcast_addr(const u8 *addr)
@@ -2118,6 +2750,9 @@ static bool airoha_eth_is_multicast_addr(const u8 *addr)
 
 static u8 airoha_rx_sport_to_fport(struct airoha_eth *eth, u8 sport)
 {
+	if (sport == eth->gdm3_src_port)
+		return AIROHA_FPORT_GDM3_PCIE;
+
 	if (sport == eth->gdm4_src_port)
 		return AIROHA_FPORT_GDM4_ETH;
 
@@ -2132,16 +2767,30 @@ static u8 airoha_rx_sport_to_fport(struct airoha_eth *eth, u8 sport)
 
 static u8 airoha_rx_sport_to_recovery_fport(struct airoha_eth *eth, u8 sport)
 {
-	u8 fport = airoha_rx_sport_to_fport(eth, sport);
-
-	if (fport)
-		return fport;
+	u8 fport;
 
 	/*
 	 * The internal switch can report a CPU-facing or otherwise unmapped
-	 * SPORT for lan2/lan3 traffic. Treat unknown recovery RX as 1G unless
-	 * the user explicitly forced the 10G-only port.
+	 * SPORT for an explicitly selected external recovery port. In that
+	 * mode there is only one expected ingress path, so preserve the port
+	 * selected by the user even when the hardware metadata is incomplete
+	 * or aliases one of the switch-facing SPORT values.
+	 * This is also needed for PCIe1/PHY8 (lan2), whose source-port value can
+	 * differ between the boot-time and re-entered Ethernet paths.
 	 */
+	if (airoha_recovery_port_is_gdm3(eth))
+		return AIROHA_FPORT_GDM3_PCIE;
+
+	if (airoha_recovery_port_is_gdm4_usb(eth))
+		return AIROHA_FPORT_GDM4_USB;
+
+	if (airoha_recovery_port_is_gdm4(eth))
+		return AIROHA_FPORT_GDM4_ETH;
+
+	fport = airoha_rx_sport_to_fport(eth, sport);
+	if (fport)
+		return fport;
+
 	if (airoha_recovery_dual_service_enabled() ||
 	    airoha_recovery_port_is_1g(eth))
 		return 1;
@@ -2216,6 +2865,17 @@ static bool airoha_rtl8261_host_update_enabled(void)
 		return true;
 
 	return false;
+}
+
+static bool airoha_rtl8261_patch_autoload_enabled(void)
+{
+	const char *autoload = env_get("rtl8261_patch_autoload");
+
+	if (!autoload)
+		return false;
+
+	return !strcmp(autoload, "1") || !strcmp(autoload, "on") ||
+	       !strcmp(autoload, "enable") || !strcmp(autoload, "true");
 }
 
 static int airoha_env_override_bool(const char *name, bool *value)
@@ -2339,6 +2999,15 @@ static void airoha_gdm4_program_src_cpu_path(struct airoha_eth *eth, u32 cport)
 	}
 }
 
+static void airoha_gdm3_program_src_cpu_path(struct airoha_eth *eth, u32 cport)
+{
+	u32 src_port = eth->gdm3_src_port;
+	u32 slot = src_port & SP_CPORT_DFT_MASK;
+
+	airoha_fe_rmw(eth, REG_SP_DFT_CPORT(src_port >> 3),
+		      SP_CPORT_MASK(slot), cport << (slot << 2));
+}
+
 static void airoha_gdm4_program_wan_ports(struct airoha_eth *eth)
 {
 	u32 val = FIELD_PREP(WAN0_MASK, eth->gdm4_src_port);
@@ -2355,8 +3024,14 @@ static void airoha_gdm4_program_wan_ports(struct airoha_eth *eth)
 static void airoha_gdm4_program_fc_map(struct airoha_eth *eth)
 {
 	u32 mask = airoha_gdm4_fc_mask(eth);
-	u32 val = 0;
+	u32 val = FC_MAP6_DEF_VALUE & mask;
 	u32 shift;
+
+	/* Source ports use their native FC IDs unless GDM2 loopback is active. */
+	if (!airoha_gdm4_loopback_enabled(eth))
+		goto write_map;
+
+	val = 0;
 
 	if (eth->gdm4_src_port >= HSGMII_LAN_7581_ETH_SRCPORT &&
 	    eth->gdm4_src_port <= HSGMII_LAN_7581_USB_SRCPORT) {
@@ -2370,6 +3045,7 @@ static void airoha_gdm4_program_fc_map(struct airoha_eth *eth)
 		val |= 2 << shift;
 	}
 
+write_map:
 	airoha_fe_rmw(eth, REG_SRC_PORT_FC_MAP6, mask, val);
 }
 
@@ -2379,6 +3055,8 @@ static void airoha_gdm4_update_cpu_path(struct airoha_eth *eth)
 	u32 sp_cport = use_cdm2 ? FE_PSE_PORT_CDM2 : FE_PSE_PORT_CDM1;
 	bool loopback = airoha_gdm4_loopback_enabled(eth);
 
+	/* GDM3/PCIe1 is a separate LAN-facing source on the same CDM1 path. */
+	airoha_gdm3_program_src_cpu_path(eth, FE_PSE_PORT_CDM1);
 	airoha_gdm4_update_loopback(eth);
 
 	if (loopback) {
@@ -2470,11 +3148,20 @@ static void airoha_fe_recovery_runtime_init(struct airoha_eth *eth)
 				    FE_PSE_PORT_PPE1);
 	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(2),
 				    FE_PSE_PORT_PPE1);
+	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(3),
+				    FE_PSE_PORT_PPE1);
+	airoha_fe_rmw(eth, REG_PPE_DFT_CPORT(0, FE_PSE_PORT_GDM3),
+		      DFT_CPORT_MASK(FE_PSE_PORT_GDM3),
+		      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM3),
+				 FE_PSE_PORT_CDM1));
 	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(4),
 				    FE_PSE_PORT_PPE1);
 	airoha_fe_clear(eth, REG_GDM_INGRESS_CFG(1), GDM_STAG_EN_MASK);
 	airoha_fe_clear(eth, REG_GDM_INGRESS_CFG(2), GDM_STAG_EN_MASK);
-	airoha_fe_clear(eth, REG_GDM_INGRESS_CFG(4), GDM_STAG_EN_MASK);
+	airoha_fe_set(eth, REG_GDM_INGRESS_CFG(3), GDM_STAG_EN_MASK);
+	airoha_fe_set(eth, REG_GDM_INGRESS_CFG(4), GDM_STAG_EN_MASK);
+	airoha_fe_set(eth, REG_GDM_TXCHN_EN(3), BIT(eth->gdm3_tx_channel));
+	airoha_fe_set(eth, REG_GDM_RXCHN_EN(3), 0xffff);
 	airoha_fe_rmw(eth, REG_GDM_LEN_CFG(1),
 		      GDM_SHORT_LEN_MASK | GDM_LONG_LEN_MASK,
 		      FIELD_PREP(GDM_SHORT_LEN_MASK, 60) |
@@ -2483,8 +3170,13 @@ static void airoha_fe_recovery_runtime_init(struct airoha_eth *eth)
 	airoha_fe_rmw(eth, REG_GDM_LEN_CFG(2),
 		      GDM_SHORT_LEN_MASK | GDM_LONG_LEN_MASK,
 		      FIELD_PREP(GDM_SHORT_LEN_MASK, 60) |
-			      FIELD_PREP(GDM_LONG_LEN_MASK,
-					 AIROHA_MAX_PACKET_SIZE));
+				      FIELD_PREP(GDM_LONG_LEN_MASK,
+						 AIROHA_MAX_PACKET_SIZE));
+	airoha_fe_rmw(eth, REG_GDM_LEN_CFG(3),
+			      GDM_SHORT_LEN_MASK | GDM_LONG_LEN_MASK,
+			      FIELD_PREP(GDM_SHORT_LEN_MASK, 60) |
+				      FIELD_PREP(GDM_LONG_LEN_MASK,
+						 AIROHA_MAX_PACKET_SIZE));
 	airoha_fe_rmw(eth, REG_GDM_LEN_CFG(4),
 		      GDM_SHORT_LEN_MASK | GDM_LONG_LEN_MASK,
 		      FIELD_PREP(GDM_SHORT_LEN_MASK, 60) |
@@ -2505,6 +3197,7 @@ static void airoha_fe_recovery_runtime_init(struct airoha_eth *eth)
 			      FIELD_PREP(GDM4_SPORT_OFF0_MASK, 8));
 	airoha_gdm4_program_wan_ports(eth);
 	airoha_gdm4_program_fc_map(eth);
+	airoha_gdm3_program_src_cpu_path(eth, FE_PSE_PORT_CDM1);
 
 	airoha_set_xsi_eth_port(eth, true);
 	airoha_gdm4_update_cpu_path(eth);
@@ -2522,7 +3215,11 @@ static void airoha_fe_recovery_runtime_init(struct airoha_eth *eth)
 	airoha_fe_rmw(eth, REG_CDM2_FWD_CFG, CDM2_OAM_QSEL_MASK,
 		      FIELD_PREP(CDM2_OAM_QSEL_MASK, 0));
 	airoha_fe_set(eth, REG_GDM3_FWD_CFG, GDM3_PAD_EN_MASK);
+	airoha_fe_set(eth, REG_GDM3_FWD_CFG, GDM_STRIP_CRC);
+	airoha_fe_set(eth, REG_GDM_TXCHN_EN(3), BIT(eth->gdm3_tx_channel));
+	airoha_fe_set(eth, REG_GDM_RXCHN_EN(3), 0xffff);
 	airoha_fe_set(eth, REG_GDM4_FWD_CFG, GDM4_PAD_EN_MASK);
+	airoha_fe_set(eth, REG_GDM4_FWD_CFG, GDM_STRIP_CRC);
 	airoha_fe_clear(eth, REG_FE_CPORT_CFG, FE_CPORT_QUEUE_XFC_MASK);
 	airoha_fe_set(eth, REG_FE_CPORT_CFG, FE_CPORT_PORT_XFC_MASK);
 	airoha_fe_rmw(eth, REG_GDM2_CHN_RLS,
@@ -2543,21 +3240,26 @@ static void airoha_fe_recovery_runtime_stop(struct airoha_eth *eth)
 				    FE_PSE_PORT_DROP);
 	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(2),
 				    FE_PSE_PORT_DROP);
+	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(3),
+				    FE_PSE_PORT_DROP);
 	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(4),
 				    FE_PSE_PORT_DROP);
 }
 
 static void airoha_set_xsi_eth_port(struct airoha_eth *eth, bool enable)
 {
-	u32 vip_mask = airoha_gdm4_vip_mask(eth);
+	u32 vip_mask = airoha_gdm4_vip_mask(eth) |
+		       airoha_gdm3_vip_mask(eth);
 
 	if (enable) {
 		airoha_fe_set(eth, REG_FE_VIP_PORT_EN, vip_mask);
 		airoha_fe_set(eth, REG_FE_IFC_PORT_EN, vip_mask);
+		airoha_fe_set(eth, REG_GDM_INGRESS_CFG(3), GDM_STAG_EN_MASK);
 		airoha_fe_set(eth, REG_GDM_INGRESS_CFG(4), GDM_STAG_EN_MASK);
 	} else {
 		airoha_fe_clear(eth, REG_FE_VIP_PORT_EN, vip_mask);
 		airoha_fe_clear(eth, REG_FE_IFC_PORT_EN, vip_mask);
+		airoha_fe_clear(eth, REG_GDM_INGRESS_CFG(3), GDM_STAG_EN_MASK);
 		airoha_fe_clear(eth, REG_GDM_INGRESS_CFG(4), GDM_STAG_EN_MASK);
 	}
 }
@@ -2720,6 +3422,19 @@ static ulong airoha_recovery_env_ulong(const char *name, ulong default_val)
 		return default_val;
 
 	return parsed;
+}
+
+static u8 airoha_recovery_env_u8(const char *name, u8 default_val, u8 max)
+{
+	ulong value = airoha_recovery_env_ulong(name, default_val);
+
+	if (value > max) {
+		printf("%s=%lu out of range (0-%u); using %u\n",
+		       name, value, max, default_val);
+		return default_val;
+	}
+
+	return value;
 }
 
 static void airoha_recovery_lan_wait_power_down(void)
@@ -3003,6 +3718,29 @@ static int airoha_rtl8261_sds_get(struct airoha_eth *eth, int phy_addr,
 		return ret;
 
 	return airoha_rtl8261_sds_wait_ready(eth, phy_addr);
+}
+
+static int airoha_rtl8261_sds_diag_get(struct airoha_eth *eth, int phy_addr,
+				       u16 sds_page, u16 sds_reg)
+{
+	u16 val;
+	int ret;
+
+	ret = airoha_rtl8261_top_set(eth, phy_addr, 40, 19,
+				     RTL8261_PHY_SDS_CMD_READ(sds_page,
+							      sds_reg));
+	if (ret)
+		return ret;
+
+	ret = airoha_rtl8261_sds_wait_ready(eth, phy_addr);
+	if (ret)
+		return ret;
+
+	ret = airoha_rtl8261_top_get(eth, phy_addr, 40, 18, &val);
+	if (ret)
+		return ret;
+
+	return val;
 }
 
 static int airoha_rtl8261_sds_write(struct airoha_eth *eth, int phy_addr,
@@ -3516,14 +4254,132 @@ static void airoha_eth_gdm4_apply_runtime_phy_cfg(struct airoha_eth *eth)
 		       eth->gdm4_phy_addr, ret);
 }
 
-static void airoha_qdma_dump_rx_window(const char *tag, int qdma_id,
-				       struct airoha_queue *q)
-{
-	int i, count = q->ndesc;
+struct airoha_rtl8261_diag_phy {
+	bool link_up;
+	bool full_duplex;
+	u16 speed;
+	u32 mode;
+	u32 rate_adapt;
+	int serdes_cfg;
+	int an;
+	int pma;
+	int pcs;
+	int phyxs;
+	int pma_mgbt;
+	int pma_pair;
+	int pcs_br1;
+	int pcs_br2;
+	int an_mgbt_ctrl1;
+	int an_mgbt_stat1;
+	int sds_7_10;
+	int sds_6_12;
+	int sds_5_0;
+	int sds_6_3;
+};
 
-	printf("rtl8261: %s qdma%d win", tag ? tag : "diag", qdma_id);
+static void airoha_rtl8261_diag_phy_get(struct airoha_eth *eth, int phy_addr,
+					struct airoha_rtl8261_diag_phy *state)
+{
+	memset(state, 0, sizeof(*state));
+	state->mode = PCS_USXGMII_MODE_10000;
+	state->rate_adapt = PCS_HSGMII_FORCE_RATE_MODE_10000;
+	state->serdes_cfg = -ENODEV;
+	state->an = -ENODEV;
+	state->pma = -ENODEV;
+	state->pcs = -ENODEV;
+	state->phyxs = -ENODEV;
+	state->pma_mgbt = -ENODEV;
+	state->pma_pair = -ENODEV;
+	state->pcs_br1 = -ENODEV;
+	state->pcs_br2 = -ENODEV;
+	state->an_mgbt_ctrl1 = -ENODEV;
+	state->an_mgbt_stat1 = -ENODEV;
+	state->sds_7_10 = -ENODEV;
+	state->sds_6_12 = -ENODEV;
+	state->sds_5_0 = -ENODEV;
+	state->sds_6_3 = -ENODEV;
+
+	if (!eth->mdio_dev)
+		return;
+
+	airoha_rtl8261_link_state_get(eth, phy_addr, &state->link_up,
+					      &state->full_duplex, &state->speed,
+					      &state->mode, &state->rate_adapt);
+	state->serdes_cfg = airoha_mdio_c45_read(
+		eth, phy_addr, RTL8261_MMD_VEND1, RTL8261_SERDES_GLOBAL_CFG);
+	state->an = airoha_mdio_read_lstatus(eth, phy_addr, MDIO_MMD_AN,
+					     MDIO_STAT1);
+	state->pma = airoha_mdio_read_lstatus(eth, phy_addr, MDIO_MMD_PMAPMD,
+					      MDIO_STAT1);
+	state->pcs = airoha_mdio_read_lstatus(eth, phy_addr, MDIO_MMD_PCS,
+					      MDIO_STAT1);
+	state->phyxs = airoha_mdio_read_lstatus(eth, phy_addr, MDIO_MMD_PHYXS,
+						MDIO_STAT1);
+	state->pma_mgbt = airoha_mdio_c45_read(
+		eth, phy_addr, MDIO_MMD_PMAPMD, RTL8261_PMA_MGBT_STATUS);
+	state->pma_pair = airoha_mdio_c45_read(
+		eth, phy_addr, MDIO_MMD_PMAPMD, RTL8261_PMA_MGBT_PAIR_SWAP);
+	state->pcs_br1 = airoha_mdio_c45_read(
+		eth, phy_addr, MDIO_MMD_PCS, RTL8261_PCS_BASE_R_STATUS1);
+	state->pcs_br2 = airoha_mdio_c45_read(
+		eth, phy_addr, MDIO_MMD_PCS, RTL8261_PCS_BASE_R_STATUS2);
+	state->an_mgbt_ctrl1 = airoha_mdio_c45_read(
+		eth, phy_addr, MDIO_MMD_AN, RTL8261_AN_MGBT_CTRL1);
+	state->an_mgbt_stat1 = airoha_mdio_c45_read(
+		eth, phy_addr, MDIO_MMD_AN, RTL8261_AN_MGBT_STATUS1);
+	state->sds_7_10 = airoha_rtl8261_sds_diag_get(eth, phy_addr, 7, 10);
+	state->sds_6_12 = airoha_rtl8261_sds_diag_get(eth, phy_addr, 6, 12);
+	state->sds_5_0 = airoha_rtl8261_sds_diag_get(eth, phy_addr, 5, 0);
+	state->sds_6_3 = airoha_rtl8261_sds_diag_get(eth, phy_addr, 6, 3);
+}
+
+static void airoha_rtl8261_diag_phy_print(const char *tag, int phy_addr,
+					  const struct airoha_rtl8261_diag_phy *s)
+{
+	printf("rtl8261: %s phy%d link=%d duplex=%s c1=%04x a434=%04x speed=%s mask=%03x mode=%s rate=%s mdio[an=%04x pma=%04x pcs=%04x phyxs=%04x]\n",
+	       tag ? tag : "diag", phy_addr, s->link_up,
+	       s->full_duplex ? "full" : "half", s->serdes_cfg, s->speed,
+	       airoha_rtl8261_speed_name(s->speed),
+	       s->speed & RTL8261_PHY_SPEED_MASK,
+	       airoha_usxgmii_mode_name(s->mode),
+	       airoha_rate_mode_name(s->rate_adapt), s->an, s->pma, s->pcs,
+	       s->phyxs);
+	printf("rtl8261: %s phy%d std pma[1=%04x rx=%d 81=%04x lpv=%d 82=%04x mdix=%x] pcs[1=%04x rx=%d 20=%04x lock=%d hiber=%d 21=%04x lat_lock=%d lat_hiber=%d ber=%02x err=%02x] an[1=%04x done=%d link=%d page=%d 20=%04x adv10g=%d adv5g=%d adv2p5g=%d 21=%04x loc_rx=%d rem_rx=%d lp10g=%d lp5g=%d lp2p5g=%d]\n",
+	       tag ? tag : "diag", phy_addr, s->pma,
+	       !!(s->pma & MDIO_STAT1_LSTATUS), s->pma_mgbt,
+	       !!(s->pma_mgbt & BIT(0)), s->pma_pair, s->pma_pair & 0x3,
+	       s->pcs, !!(s->pcs & MDIO_STAT1_LSTATUS), s->pcs_br1,
+	       !!(s->pcs_br1 & BIT(0)), !!(s->pcs_br1 & BIT(1)), s->pcs_br2,
+	       !!(s->pcs_br2 & BIT(15)), !!(s->pcs_br2 & BIT(14)),
+	       (s->pcs_br2 >> 8) & 0x3f, s->pcs_br2 & 0xff, s->an,
+	       !!(s->an & BIT(5)), !!(s->an & BIT(2)), !!(s->an & BIT(6)),
+	       s->an_mgbt_ctrl1, !!(s->an_mgbt_ctrl1 & BIT(12)),
+	       !!(s->an_mgbt_ctrl1 & BIT(8)),
+	       !!(s->an_mgbt_ctrl1 & BIT(7)), s->an_mgbt_stat1,
+	       !!(s->an_mgbt_stat1 & BIT(13)),
+	       !!(s->an_mgbt_stat1 & BIT(12)),
+	       !!(s->an_mgbt_stat1 & BIT(11)),
+	       !!(s->an_mgbt_stat1 & BIT(6)),
+	       !!(s->an_mgbt_stat1 & BIT(5)));
+	printf("rtl8261: %s phy%d sds[7:10=%04x 6:12=%04x 5:0=%04x 6:3=%04x]\n",
+	       tag ? tag : "diag", phy_addr, s->sds_7_10, s->sds_6_12,
+	       s->sds_5_0, s->sds_6_3);
+}
+
+static void airoha_qdma_dump_rx_window(const char *tag, int qdma_id,
+					       struct airoha_queue *q)
+{
+	int i, count;
+
+	if (!q->ndesc)
+		return;
+
+	count = min(q->ndesc, AIROHA_DIAG_RX_WINDOW_SIZE);
+
+	printf("rtl8261: %s qdma%d win head=%u ndesc=%d",
+	       tag ? tag : "diag", qdma_id, q->head, q->ndesc);
 	for (i = 0; i < count; i++) {
-		int idx = i;
+		int idx = (q->head + i) % q->ndesc;
 		struct airoha_qdma_desc *desc = &q->desc[idx];
 		u32 ctrl = le32_to_cpu(READ_ONCE(desc->ctrl));
 		u32 msg1 = le32_to_cpu(READ_ONCE(desc->msg1));
@@ -3536,22 +4392,56 @@ static void airoha_qdma_dump_rx_window(const char *tag, int qdma_id,
 static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 				 bool dump_windows)
 {
+	struct airoha_rtl8261_diag_phy phy8_state;
 	bool link_up = false, full_duplex = false;
 	u32 pcs_sts1 = 0, base_r_sts1 = 0, an_sts0 = 0, an_sts2 = 0;
 	u32 rx_freqdet = 0;
 	u32 ppe1_route = 0, ppe2_route = 0, sp_cport = 0, fc_map6 = 0;
+	u32 gdm3_ppe1_route = 0, gdm3_sp_cport = 0;
+	u32 vip_port_en = 0, ifc_port_en = 0;
+	u32 gdm3_fwd = 0, gdm3_ingress = 0, gdm3_lpbk = 0;
+	u32 gdm3_txch = 0, gdm3_rxch = 0;
+	u32 gdm4_txch = 0, gdm4_rxch = 0;
 	u32 gdm4_fwd = 0, gdm4_src = 0, gdm4_src_legacy = 0;
 	u32 gdm2_fwd = 0, gdm2_lpbk = 0, gdm2_txch = 0, gdm2_rxch = 0;
 	u32 gdm4_tx_ok = 0, gdm4_rx0 = 0, gdm4_rx1 = 0, gdm4_rx2 = 0, gdm4_rx3 = 0;
 	u32 qdma0_tx0 = 0, qdma0_tx1 = 0, qdma0_rx0 = 0, qdma0_rx1 = 0;
 	u32 qdma1_tx0 = 0, qdma1_tx1 = 0, qdma1_rx0 = 0, qdma1_rx1 = 0;
+	u32 qdma0_cfg = 0, qdma1_cfg = 0;
 	u16 qdma0_head = 0, qdma0_cpu_idx = 0, qdma0_dma_idx = 0;
 	u16 qdma1_head = 0, qdma1_cpu_idx = 0, qdma1_dma_idx = 0;
 	u32 qdma0_desc_ctrl = 0, qdma0_desc_addr = 0, qdma0_desc_msg1 = 0;
 	u32 qdma1_desc_ctrl = 0, qdma1_desc_addr = 0, qdma1_desc_msg1 = 0;
 	u32 fe_lan_mac_h = 0, fe_lan_mac_lmin = 0, fe_wan_mac_h = 0, fe_wan_mac_lmin = 0;
 	u32 xfi_mac_h = 0, xfi_mac_l = 0, xfi_gib_cfg = 0, xfi_logic_rst = 0;
+	u32 xsi_int_sts = 0, xsi_int_en = 0, xsi_fc_sts = 0;
+	u32 xsi_fifo_sts = 0, xsi_fault_sts = 0, xsi_if_sts = 0;
+	u32 xsi_tx_octets = 0, xsi_tx_pkt = 0, xsi_txmbi_eth = 0;
+	u32 xsi_txmbi_uc = 0, xsi_txmbi_mc_bc = 0, xsi_txmbi_pause = 0;
+	u32 xsi_tx_sof_eof = 0, xsi_tx_bytes = 0, xsi_tx_normal = 0;
+	u32 xsi_tx_deq1 = 0, xsi_tx_deq2 = 0;
+	u32 xsi_rx_frame = 0, xsi_rx_octets = 0, xsi_rx_pkt = 0;
+	u32 xsi_rx_eth = 0, xsi_rx_pause = 0, xsi_rx_len_frag = 0;
+	u32 xsi_rx_crc_coding = 0, xsi_rxmbi_pkt = 0, xsi_rxmbi_drop = 0;
+	u32 xsi_rx_sof_eof = 0, xsi_rx_mpi_sop_eop = 0;
+	u32 pcie1_pcs_sts1 = 0, pcie1_base_r_sts1 = 0;
+	u32 pcie1_an_sts0 = 0, pcie1_an_sts2 = 0;
+	u32 pcie1_xfi_gib_cfg = 0, pcie1_xfi_logic_rst = 0;
+	u32 pcie1_rx_freqdet = 0;
+	u32 pcie1_seq_dis = 0, pcie1_freq_cycle = 0;
+	u32 pcie1_lock_window = 0, pcie1_unlock_window = 0;
+	u32 pcie1_freq_ctrl = 0, pcie1_fll1 = 0, pcie1_fllb = 0;
+	u32 pcie1_pr_idac = 0, pcie1_pr_lpf = 0, pcie1_pr_pwdb = 0;
+	u32 pcie1_k_idac = 0, pcie1_k_load = 0;
+	u32 pcie1_pll_jcpll = 0, pcie1_pll_txpll = 0;
+	u32 pcie1_pll_jpcw = 0, pcie1_pll_tpcw = 0;
+	u32 pcie1_pll_freq = 0, pcie1_pll_ft_freq = 0;
+	u32 pcie1_jcpll_ft_freq = 0, pcie1_jcpll_500m_freq = 0;
+	u32 pcie1_ana_jcpll = 0, pcie1_ana_tx1 = 0;
+	u32 pcie1_ana_rx1_phyck = 0, pcie1_ana_rx1_dac = 0;
 	u32 gdma4_tmbi_frag = 0, gdma4_rmbi_frag = 0;
+	u64 gdm3_tx_ok_pkts = 0, gdm3_tx_eth_pkts = 0, gdm3_rx_ok_pkts = 0;
+	u32 gdm3_tx_drop = 0, gdm3_rx_drop = 0;
 	u64 gdm4_tx_ok_pkts = 0, gdm4_tx_eth_pkts = 0, gdm4_rx_ok_pkts = 0;
 	u32 gdm4_tx_drop = 0, gdm4_rx_drop = 0;
 	u32 sw_mfc = 0, sw_cfc = 0, sw_atc = 0;
@@ -3563,13 +4453,20 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 	u16 speed = 0;
 	int an = -1, pma = -1, pcs = -1, phyxs = -1;
 	int phy_addr;
+	int phy5_id1 = -1, phy5_id2 = -1, phy8_id1 = -1, phy8_id2 = -1;
+	int phy15_id1 = -1, phy15_id2 = -1;
+	u32 gpio_data = readl((void __iomem *)(GPIO_SYSCTL_BASE + GPIO_REG_DATA));
 	int pma_mgbt = -1, pma_pair = -1, pcs_br1 = -1, pcs_br2 = -1;
 	int an_mgbt_ctrl1 = -1, an_mgbt_stat1 = -1;
 	int phy9_ctrl = -1, phy9_stat = -1, phy10_ctrl = -1, phy10_stat = -1;
+	int gdm3_phy_rst = -ENODEV, gdm3_mac_rst = -ENODEV;
+	int phy5_sds_7_10 = -ENODEV, phy5_sds_6_12 = -ENODEV;
+	int phy5_sds_5_0 = -ENODEV, phy5_sds_6_3 = -ENODEV;
 
 	if (!eth)
 		return;
 	phy_addr = eth->gdm4_phy_addr;
+	airoha_rtl8261_diag_phy_get(eth, RTL8261_PHY8_ADDR, &phy8_state);
 
 	if (eth->mdio_dev) {
 		airoha_rtl8261_link_state_get(eth, phy_addr, &link_up,
@@ -3601,10 +4498,30 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 		an_mgbt_stat1 = airoha_mdio_c45_read(eth, phy_addr,
 						     MDIO_MMD_AN,
 						     RTL8261_AN_MGBT_STATUS1);
-		phy_serdes_cfg = airoha_mdio_c45_read(eth,
-						      phy_addr,
-						      RTL8261_MMD_VEND1,
-						      RTL8261_SERDES_GLOBAL_CFG);
+			phy_serdes_cfg = airoha_mdio_c45_read(eth,
+							      phy_addr,
+							      RTL8261_MMD_VEND1,
+							      RTL8261_SERDES_GLOBAL_CFG);
+		phy5_id1 = airoha_mdio_c45_read(eth, RTL8261_PHY5_ADDR,
+						 MDIO_MMD_PMAPMD, MII_PHYSID1);
+		phy5_id2 = airoha_mdio_c45_read(eth, RTL8261_PHY5_ADDR,
+						 MDIO_MMD_PMAPMD, MII_PHYSID2);
+		phy8_id1 = airoha_mdio_c45_read(eth, RTL8261_PHY8_ADDR,
+						 MDIO_MMD_PMAPMD, MII_PHYSID1);
+		phy8_id2 = airoha_mdio_c45_read(eth, RTL8261_PHY8_ADDR,
+						 MDIO_MMD_PMAPMD, MII_PHYSID2);
+		phy15_id1 = airoha_mdio_c22_read(eth, eth->gdm4_usb_phy_addr,
+						  MII_PHYSID1);
+		phy15_id2 = airoha_mdio_c22_read(eth, eth->gdm4_usb_phy_addr,
+						  MII_PHYSID2);
+		phy5_sds_7_10 = airoha_rtl8261_sds_diag_get(
+			eth, RTL8261_PHY5_ADDR, 7, 10);
+		phy5_sds_6_12 = airoha_rtl8261_sds_diag_get(
+			eth, RTL8261_PHY5_ADDR, 6, 12);
+		phy5_sds_5_0 = airoha_rtl8261_sds_diag_get(
+			eth, RTL8261_PHY5_ADDR, 5, 0);
+		phy5_sds_6_3 = airoha_rtl8261_sds_diag_get(
+			eth, RTL8261_PHY5_ADDR, 6, 3);
 	}
 
 	if (eth->eth_pcs_usxgmii) {
@@ -3613,8 +4530,18 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 					PCS_USXGMII_BASE_R_10GB_T_PCS_STUS_1);
 		an_sts0 = airoha_rr(eth->eth_pcs_usxgmii,
 				    PCS_USXGMII_PCS_AN_STATS_0);
-		an_sts2 = airoha_rr(eth->eth_pcs_usxgmii,
-				    PCS_USXGMII_PCS_AN_STATS_2);
+			an_sts2 = airoha_rr(eth->eth_pcs_usxgmii,
+					    PCS_USXGMII_PCS_AN_STATS_2);
+	}
+	if (eth->pcie1_pcs_usxgmii) {
+		pcie1_pcs_sts1 = airoha_rr(eth->pcie1_pcs_usxgmii,
+						PCS_USXGMII_PCS_STUS_1);
+		pcie1_base_r_sts1 = airoha_rr(eth->pcie1_pcs_usxgmii,
+						   PCS_USXGMII_BASE_R_10GB_T_PCS_STUS_1);
+		pcie1_an_sts0 = airoha_rr(eth->pcie1_pcs_usxgmii,
+						 PCS_USXGMII_PCS_AN_STATS_0);
+		pcie1_an_sts2 = airoha_rr(eth->pcie1_pcs_usxgmii,
+						 PCS_USXGMII_PCS_AN_STATS_2);
 	}
 
 	if (eth->fe_regs) {
@@ -3622,10 +4549,23 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 					  REG_PPE_DFT_CPORT(0, FE_PSE_PORT_GDM4));
 		ppe2_route = airoha_fe_rr(eth,
 					  REG_PPE_DFT_CPORT(1, FE_PSE_PORT_GDM4));
-		sp_cport = airoha_fe_rr(eth,
-					 REG_SP_DFT_CPORT(eth->gdm4_src_port >> 3));
+			sp_cport = airoha_fe_rr(eth,
+						 REG_SP_DFT_CPORT(eth->gdm4_src_port >> 3));
+		gdm3_ppe1_route = airoha_fe_rr(
+			eth, REG_PPE_DFT_CPORT(0, FE_PSE_PORT_GDM3));
+		gdm3_sp_cport = airoha_fe_rr(
+			eth, REG_SP_DFT_CPORT(eth->gdm3_src_port >> 3));
 		fc_map6 = airoha_fe_rr(eth, REG_SRC_PORT_FC_MAP6);
+		vip_port_en = airoha_fe_rr(eth, REG_FE_VIP_PORT_EN);
+		ifc_port_en = airoha_fe_rr(eth, REG_FE_IFC_PORT_EN);
+		gdm3_fwd = airoha_fe_rr(eth, REG_GDM_FWD_CFG(3));
+		gdm3_ingress = airoha_fe_rr(eth, REG_GDM_INGRESS_CFG(3));
+		gdm3_lpbk = airoha_fe_rr(eth, REG_GDM_LPBK_CFG(3));
+		gdm3_txch = airoha_fe_rr(eth, REG_GDM_TXCHN_EN(3));
+		gdm3_rxch = airoha_fe_rr(eth, REG_GDM_RXCHN_EN(3));
 		gdm4_fwd = airoha_fe_rr(eth, REG_GDM_FWD_CFG(4));
+		gdm4_txch = airoha_fe_rr(eth, REG_GDM_TXCHN_EN(4));
+		gdm4_rxch = airoha_fe_rr(eth, REG_GDM_RXCHN_EN(4));
 		gdm4_src = airoha_fe_rr(eth, REG_GDM4_SRC_PORT_SET);
 		gdm4_src_legacy = airoha_fe_rr(eth, REG_GDM4_SRC_PORT_SET_LEGACY);
 		gdm2_fwd = airoha_fe_rr(eth, REG_GDM_FWD_CFG(2));
@@ -3636,7 +4576,18 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 		gdm4_rx0 = airoha_fe_rr(eth, REG_FE_DBG_GDM4_RX_BASE + 0x0);
 		gdm4_rx1 = airoha_fe_rr(eth, REG_FE_DBG_GDM4_RX_BASE + 0x4);
 		gdm4_rx2 = airoha_fe_rr(eth, REG_FE_DBG_GDM4_RX_BASE + 0x8);
-		gdm4_rx3 = airoha_fe_rr(eth, REG_FE_DBG_GDM4_RX_BASE + 0xc);
+			gdm4_rx3 = airoha_fe_rr(eth, REG_FE_DBG_GDM4_RX_BASE + 0xc);
+		gdm3_tx_ok_pkts =
+			((u64)airoha_fe_rr(eth, REG_FE_GDM_TX_OK_PKT_CNT_H(3)) << 32) |
+			airoha_fe_rr(eth, REG_FE_GDM_TX_OK_PKT_CNT_L(3));
+		gdm3_tx_eth_pkts =
+			((u64)airoha_fe_rr(eth, REG_FE_GDM_TX_ETH_PKT_CNT_H(3)) << 32) |
+			airoha_fe_rr(eth, REG_FE_GDM_TX_ETH_PKT_CNT_L(3));
+		gdm3_rx_ok_pkts =
+			((u64)airoha_fe_rr(eth, REG_FE_GDM_RX_OK_PKT_CNT_H(3)) << 32) |
+			airoha_fe_rr(eth, REG_FE_GDM_RX_OK_PKT_CNT_L(3));
+		gdm3_tx_drop = airoha_fe_rr(eth, REG_FE_GDM_TX_ETH_DROP_CNT(3));
+		gdm3_rx_drop = airoha_fe_rr(eth, REG_FE_GDM_RX_ETH_DROP_CNT(3));
 		gdm4_tx_ok_pkts =
 			((u64)airoha_fe_rr(eth, REG_FE_GDM_TX_OK_PKT_CNT_H(4)) << 32) |
 			airoha_fe_rr(eth, REG_FE_GDM_TX_OK_PKT_CNT_L(4));
@@ -3678,15 +4629,120 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 		xfi_logic_rst = airoha_rr(eth->eth_pcs_xfi_mac, PCS_XFI_LOGIC_RST);
 		xfi_mac_h = airoha_rr(eth->eth_pcs_xfi_mac, PCS_XFI_MACADDRH);
 		xfi_mac_l = airoha_rr(eth->eth_pcs_xfi_mac, PCS_XFI_MACADDRL);
+		xsi_int_sts = airoha_rr(eth->eth_pcs_xfi_mac, PCS_XFI_INT_STS);
+		xsi_int_en = airoha_rr(eth->eth_pcs_xfi_mac, PCS_XFI_INT_EN);
+		xsi_fc_sts = airoha_rr(eth->eth_pcs_xfi_mac, PCS_XFI_FC_STS);
+		xsi_fifo_sts = airoha_rr(eth->eth_pcs_xfi_mac, PCS_XFI_FIFO_STS);
+		xsi_fault_sts = airoha_rr(eth->eth_pcs_xfi_mac,
+					     PCS_XFI_FAULT_STS);
+		xsi_if_sts = airoha_rr(eth->eth_pcs_xfi_mac, PCS_XFI_IF_STS);
+		xsi_tx_octets = airoha_rr(eth->eth_pcs_xfi_mac,
+					     PCS_XFI_TX_OCTETS_CNT);
+		xsi_tx_pkt = airoha_rr(eth->eth_pcs_xfi_mac, PCS_XFI_TX_PKT_CNT);
+		xsi_txmbi_eth = airoha_rr(eth->eth_pcs_xfi_mac,
+					     PCS_XFI_TXMBI_ETH_CNT);
+		xsi_txmbi_uc = airoha_rr(eth->eth_pcs_xfi_mac,
+					    PCS_XFI_TXMBI_UC_ETH_CNT);
+		xsi_txmbi_mc_bc = airoha_rr(eth->eth_pcs_xfi_mac,
+					       PCS_XFI_TXMBI_MC_BC_CNT);
+		xsi_txmbi_pause = airoha_rr(eth->eth_pcs_xfi_mac,
+					       PCS_XFI_TXMBI_PAUSE_CNT);
+		xsi_tx_sof_eof = airoha_rr(eth->eth_pcs_xfi_mac,
+					      PCS_XFI_TX_SOF_EOF_CNT);
+		xsi_tx_bytes = airoha_rr(eth->eth_pcs_xfi_mac,
+					    PCS_XFI_TX_BYTES_CNT);
+		xsi_tx_normal = airoha_rr(eth->eth_pcs_xfi_mac,
+					     PCS_XFI_TX_NORMAL_PKT_BYTES_CNT);
+		xsi_tx_deq1 = airoha_rr(eth->eth_pcs_xfi_mac,
+					   PCS_XFI_TX_DEQ_CHECK_CNT1);
+		xsi_tx_deq2 = airoha_rr(eth->eth_pcs_xfi_mac,
+					   PCS_XFI_TX_DEQ_CHECK_CNT2);
+		xsi_rx_frame = airoha_rr(eth->eth_pcs_xfi_mac,
+					    PCS_XFI_RX_FRAME_CNT);
+		xsi_rx_octets = airoha_rr(eth->eth_pcs_xfi_mac,
+					     PCS_XFI_RX_OCTETS_CNT);
+		xsi_rx_pkt = airoha_rr(eth->eth_pcs_xfi_mac, PCS_XFI_RX_PKT_CNT);
+		xsi_rx_eth = airoha_rr(eth->eth_pcs_xfi_mac, PCS_XFI_RX_ETH_CNT);
+		xsi_rx_pause = airoha_rr(eth->eth_pcs_xfi_mac,
+					    PCS_XFI_RX_PAUSE_CNT);
+		xsi_rx_len_frag = airoha_rr(eth->eth_pcs_xfi_mac,
+					       PCS_XFI_RX_LEN_FRAG_ERR_CNT);
+		xsi_rx_crc_coding = airoha_rr(eth->eth_pcs_xfi_mac,
+						 PCS_XFI_RX_CRC_CODING_ERR_CNT);
+		xsi_rxmbi_pkt = airoha_rr(eth->eth_pcs_xfi_mac,
+					     PCS_XFI_RXMBI_PKT_CNT);
+		xsi_rxmbi_drop = airoha_rr(eth->eth_pcs_xfi_mac,
+					      PCS_XFI_RXMBI_DROP_CNT);
+		xsi_rx_sof_eof = airoha_rr(eth->eth_pcs_xfi_mac,
+					      PCS_XFI_RX_SOF_EOF_CNT);
+		xsi_rx_mpi_sop_eop = airoha_rr(eth->eth_pcs_xfi_mac,
+						  PCS_XFI_RX_MPI_SOP_EOP_CNT);
 	}
 
 	if (eth->eth_pcs_xfi_pma)
 		rx_freqdet = airoha_rr(eth->eth_pcs_xfi_pma, PCS_PMA_RX_FREQDET);
+	if (eth->pcie1_pcs_xfi_mac) {
+		pcie1_xfi_gib_cfg = airoha_rr(eth->pcie1_pcs_xfi_mac,
+						   PCS_XFI_GIB_CFG);
+		pcie1_xfi_logic_rst = airoha_rr(eth->pcie1_pcs_xfi_mac,
+						    PCS_XFI_LOGIC_RST);
+	}
+	if (eth->pcie1_pcs_xfi_pma) {
+		pcie1_rx_freqdet = airoha_rr(eth->pcie1_pcs_xfi_pma,
+						 PCS_PMA_RX_FREQDET);
+		pcie1_seq_dis = airoha_rr(eth->pcie1_pcs_xfi_pma,
+					 PCS_PMA_RX_CTRL_SEQUENCE_DISB_CTRL_1);
+		pcie1_freq_cycle = airoha_rr(eth->pcie1_pcs_xfi_pma,
+					    PCS_PMA_SS_RX_FREQ_DET_1);
+		pcie1_lock_window = airoha_rr(eth->pcie1_pcs_xfi_pma,
+					     PCS_PMA_SS_RX_FREQ_DET_2);
+		pcie1_unlock_window = airoha_rr(eth->pcie1_pcs_xfi_pma,
+					       PCS_PMA_SS_RX_FREQ_DET_3);
+		pcie1_freq_ctrl = airoha_rr(eth->pcie1_pcs_xfi_pma,
+					   PCS_PMA_SS_RX_FREQ_DET_4);
+		pcie1_fll1 = airoha_rr(eth->pcie1_pcs_xfi_pma,
+				      PCS_PMA_RX_FLL_1);
+		pcie1_fllb = airoha_rr(eth->pcie1_pcs_xfi_pma,
+				      PCS_PMA_RX_FLL_B);
+		pcie1_pr_idac = airoha_rr(eth->pcie1_pcs_xfi_pma,
+					 PCS_PMA_PXP_CDR_PR_IDAC);
+		pcie1_pr_lpf = airoha_rr(eth->pcie1_pcs_xfi_pma,
+					PCS_PMA_PXP_CDR_PR_LPF_C_EN);
+		pcie1_pr_pwdb = airoha_rr(eth->pcie1_pcs_xfi_pma,
+					 PCS_PMA_PXP_CDR_PR_PWDB);
+		pcie1_k_idac = airoha_rr(eth->pcie1_pcs_xfi_pma,
+					PCS_PMA_DIG_RESERVE_13);
+		pcie1_k_load = airoha_rr(eth->pcie1_pcs_xfi_pma,
+					PCS_PMA_DIG_RESERVE_14);
+	}
+	if (eth->pcie1_pcs_xfi_pma0) {
+		pcie1_pll_jcpll = airoha_rr(eth->pcie1_pcs_xfi_pma0, 0x828);
+		pcie1_pll_txpll = airoha_rr(eth->pcie1_pcs_xfi_pma0, 0x854);
+		pcie1_pll_jpcw = airoha_rr(eth->pcie1_pcs_xfi_pma0, 0x800);
+		pcie1_pll_tpcw = airoha_rr(eth->pcie1_pcs_xfi_pma0, 0x798);
+		pcie1_pll_freq = airoha_rr(eth->pcie1_pcs_xfi_pma0, 0x534);
+		pcie1_pll_ft_freq = airoha_rr(eth->pcie1_pcs_xfi_pma0, 0x538);
+		pcie1_jcpll_ft_freq = airoha_rr(eth->pcie1_pcs_xfi_pma0,
+						 0x750);
+		pcie1_jcpll_500m_freq = airoha_rr(eth->pcie1_pcs_xfi_pma0,
+						   0x754);
+	}
+	if (eth->pcie1_pcs_xfi_ana) {
+		pcie1_ana_jcpll = airoha_rr(eth->pcie1_pcs_xfi_ana, 0x4c);
+		pcie1_ana_tx1 = airoha_rr(eth->pcie1_pcs_xfi_ana, 0xe8);
+		pcie1_ana_rx1_phyck = airoha_rr(eth->pcie1_pcs_xfi_ana, 0x1b8);
+		pcie1_ana_rx1_dac = airoha_rr(eth->pcie1_pcs_xfi_ana, 0x238);
+	}
+	if (eth->gdm3_pcs_phy_rst)
+		gdm3_phy_rst = reset_status(eth->gdm3_pcs_phy_rst);
+	if (eth->gdm3_pcs_mac_rst)
+		gdm3_mac_rst = reset_status(eth->gdm3_pcs_mac_rst);
 
 	if (airoha_qdma_ready(&eth->qdma[0])) {
 		struct airoha_queue *q = &eth->qdma[0].q_rx[0];
 		struct airoha_qdma_desc *desc = &q->desc[q->head];
 
+		qdma0_cfg = airoha_qdma_rr(&eth->qdma[0], REG_QDMA_GLOBAL_CFG);
 		qdma0_tx0 = airoha_qdma_rr(&eth->qdma[0], REG_QDMA_DBG_TX_BASE + 0x0);
 		qdma0_tx1 = airoha_qdma_rr(&eth->qdma[0], REG_QDMA_DBG_TX_BASE + 0x4);
 		qdma0_rx0 = airoha_qdma_rr(&eth->qdma[0], REG_QDMA_DBG_RX_BASE + 0x0);
@@ -3705,6 +4761,7 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 		struct airoha_queue *q = &eth->qdma[1].q_rx[0];
 		struct airoha_qdma_desc *desc = &q->desc[q->head];
 
+		qdma1_cfg = airoha_qdma_rr(&eth->qdma[1], REG_QDMA_GLOBAL_CFG);
 		qdma1_tx0 = airoha_qdma_rr(&eth->qdma[1], REG_QDMA_DBG_TX_BASE + 0x0);
 		qdma1_tx1 = airoha_qdma_rr(&eth->qdma[1], REG_QDMA_DBG_TX_BASE + 0x4);
 		qdma1_rx0 = airoha_qdma_rr(&eth->qdma[1], REG_QDMA_DBG_RX_BASE + 0x0);
@@ -3719,6 +4776,12 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 		qdma1_desc_msg1 = le32_to_cpu(READ_ONCE(desc->msg1));
 	}
 
+	printf("rtl8261: %s ext mode=%s gpio21=%u gpio23=%u phy5[id=%04x:%04x] phy8[id=%04x:%04x] phy15[id=%04x:%04x]\n",
+	       tag ? tag : "diag",
+	       (gpio_data & BIT(21)) && !(gpio_data & BIT(23)) ? "DC" :
+	       (!(gpio_data & BIT(21)) && (gpio_data & BIT(23)) ? "AC" : "unknown"),
+	       !!(gpio_data & BIT(21)), !!(gpio_data & BIT(23)),
+	       phy5_id1, phy5_id2, phy8_id1, phy8_id2, phy15_id1, phy15_id2);
 	printf("rtl8261: %s phy%d link=%d duplex=%s c1=%04x a434=%04x speed=%s mask=%03x mode=%s rate=%s mdio[an=%04x pma=%04x pcs=%04x phyxs=%04x] pcs[4=%08x 30=%08x 310=%08x 318=%08x] sigdet=%d pcslink=%d usx=%d freqdet=%08x fbck=%d\n",
 	       tag ? tag : "diag", phy_addr, link_up,
 	       full_duplex ? "full" : "half", phy_serdes_cfg, speed,
@@ -3743,10 +4806,15 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 	       an_mgbt_stat1, !!(an_mgbt_stat1 & BIT(13)),
 	       !!(an_mgbt_stat1 & BIT(12)), !!(an_mgbt_stat1 & BIT(11)),
 	       !!(an_mgbt_stat1 & BIT(6)), !!(an_mgbt_stat1 & BIT(5)));
-	printf("rtl8261: %s fe route ppe1_dft=%08x ppe2_dft=%08x sport24_map=%08x fc_map6=%08x use_cdm2=%d loopback=%d gdm4_fwd=%08x gdm4_src[new=%08x old=%08x] gdm2[fwd=%08x lpbk=%08x txch=%08x rxch=%08x] fport[def=%u tx=%u rx=%u] last_rx[v=%d qdma=%u sport=0x%x crsn=0x%x ppe=%u len=%u ctrl=%08x msg1=%08x]\n",
+	printf("rtl8261: %s phy%d sds[7:10=%04x 6:12=%04x 5:0=%04x 6:3=%04x]\n",
+	       tag ? tag : "diag", RTL8261_PHY5_ADDR, phy5_sds_7_10,
+	       phy5_sds_6_12, phy5_sds_5_0, phy5_sds_6_3);
+	airoha_rtl8261_diag_phy_print(tag, RTL8261_PHY8_ADDR, &phy8_state);
+	printf("rtl8261: %s fe route ppe1_dft=%08x ppe2_dft=%08x sport24_map=%08x fc_map6=%08x use_cdm2=%d loopback=%d gdm4[fwd=%08x txch=%08x rxch=%08x src_new=%08x src_old=%08x] gdm2[fwd=%08x lpbk=%08x txch=%08x rxch=%08x] fport[def=%u tx=%u rx=%u] last_rx[v=%d qdma=%u sport=0x%x crsn=0x%x ppe=%u len=%u ctrl=%08x msg1=%08x]\n",
 	       tag ? tag : "diag", ppe1_route, ppe2_route, sp_cport, fc_map6,
 	       airoha_gdm4_use_cdm2(eth), airoha_gdm4_loopback_enabled(eth),
-	       gdm4_fwd, gdm4_src, gdm4_src_legacy, gdm2_fwd, gdm2_lpbk,
+	       gdm4_fwd, gdm4_txch, gdm4_rxch, gdm4_src, gdm4_src_legacy,
+	       gdm2_fwd, gdm2_lpbk,
 	       gdm2_txch, gdm2_rxch, eth->default_tx_fport, eth->last_tx_fport,
 	       eth->last_rx_fport, eth->last_rx_valid, eth->last_rx_qdma,
 	       eth->last_rx_sport, eth->last_rx_crsn, eth->last_rx_ppe_entry,
@@ -3759,6 +4827,38 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 	       tag ? tag : "diag", gdm4_tx_ok_pkts, gdm4_tx_eth_pkts,
 	       gdm4_tx_drop, gdm4_rx_ok_pkts, gdm4_rx_drop, gdma4_tmbi_frag,
 	       gdma4_rmbi_frag);
+	printf("rtl8261: %s gdm3 cfg[phy=%u src=0x%x txchan=%u nboq=%u fwd=%08x ingress=%08x lpbk=%08x txen=%08x rxen=%08x] route[ppe1=%08x sport=%08x vip=%08x ifc=%08x]\n",
+	       tag ? tag : "diag", eth->gdm3_phy_addr, eth->gdm3_src_port,
+	       eth->gdm3_tx_channel, eth->gdm3_nboq, gdm3_fwd, gdm3_ingress,
+	       gdm3_lpbk, gdm3_txch, gdm3_rxch, gdm3_ppe1_route,
+	       gdm3_sp_cport, vip_port_en, ifc_port_en);
+	printf("rtl8261: %s gdm3 mib[tx_ok=%llu tx_eth=%llu tx_drop=%08x rx_ok=%llu rx_drop=%08x] pcs[4=%08x 30=%08x 310=%08x 318=%08x] xfi[gib=%08x rst=%08x] lane_rst[pulse=%d phy=%d mac=%d] freqdet=%08x fbck=%d\n",
+	       tag ? tag : "diag", gdm3_tx_ok_pkts, gdm3_tx_eth_pkts,
+	       gdm3_tx_drop, gdm3_rx_ok_pkts, gdm3_rx_drop, pcie1_pcs_sts1,
+	       pcie1_base_r_sts1, pcie1_an_sts0, pcie1_an_sts2,
+	       pcie1_xfi_gib_cfg, pcie1_xfi_logic_rst,
+	       eth->gdm3_pcs_reset_done, gdm3_phy_rst, gdm3_mac_rst,
+	       pcie1_rx_freqdet,
+	       !!(pcie1_rx_freqdet & PCS_PMA_FBCK_LOCK));
+	printf("rtl8261: %s gdm3 kflow[seq=%08x cycle=%08x lock=%08x unlock=%08x ctrl=%08x freq=%08x fll1=%08x fllb=%08x idac=%08x lpf=%08x pwdb=%08x bands=%08x load=%08x]\n",
+	       tag ? tag : "diag", pcie1_seq_dis, pcie1_freq_cycle,
+	       pcie1_lock_window, pcie1_unlock_window, pcie1_freq_ctrl,
+	       pcie1_rx_freqdet, pcie1_fll1, pcie1_fllb, pcie1_pr_idac,
+	       pcie1_pr_lpf, pcie1_pr_pwdb, pcie1_k_idac, pcie1_k_load);
+	printf("rtl8261: %s gdm3 ana_map[ops=%u fields=%u bad=%03x/%08x] pll0[jc=%08x tx=%08x jpcw=%08x tpcw=%08x] lane1[jcpll=%08x tx=%08x rxphy=%08x rxdac=%08x]\n",
+	       tag ? tag : "diag", eth->gdm3_pcs_ana_ops,
+	       eth->gdm3_pcs_ana_fields, eth->gdm3_pcs_ana_bad_reg,
+	       eth->gdm3_pcs_ana_bad_bits, pcie1_pll_jcpll,
+	       pcie1_pll_txpll, pcie1_pll_jpcw, pcie1_pll_tpcw,
+	       pcie1_ana_jcpll, pcie1_ana_tx1, pcie1_ana_rx1_phyck,
+	       pcie1_ana_rx1_dac);
+	printf("rtl8261: %s gdm3 pll0_freq[tx=%08x lock=%d ft=%08x lock=%d jcft=%08x lock=%d jc500=%08x lock=%d] settle_ms=%u\n",
+	       tag ? tag : "diag", pcie1_pll_freq,
+	       !!(pcie1_pll_freq & BIT(0)), pcie1_pll_ft_freq,
+	       !!(pcie1_pll_ft_freq & BIT(0)), pcie1_jcpll_ft_freq,
+	       !!(pcie1_jcpll_ft_freq & BIT(0)), pcie1_jcpll_500m_freq,
+	       !!(pcie1_jcpll_500m_freq & BIT(0)),
+	       AIROHA_PCS_PLL_SETTLE_MS);
 	printf("rtl8261: %s mac fe[lan=%08x/%08x wan=%08x/%08x] xfi=%08x/%08x\n",
 	       tag ? tag : "diag", fe_lan_mac_h, fe_lan_mac_lmin,
 	       fe_wan_mac_h, fe_wan_mac_lmin, xfi_mac_h, xfi_mac_l);
@@ -3766,17 +4866,39 @@ static void airoha_eth_gdm4_diag(struct airoha_eth *eth, const char *tag,
 	       tag ? tag : "diag", sw_mfc, sw_cfc, sw_atc, sw_pcr1, sw_pmcr1,
 	       sw_pcr2, sw_pmcr2, sw_pcr6, sw_pmcr6, phy9_ctrl, phy9_stat,
 	       phy10_ctrl, phy10_stat, airoha_recovery_lan_power_down_ms);
-	printf("rtl8261: %s xfi gib=%08x rst=%08x\n", tag ? tag : "diag",
-	       xfi_gib_cfg, xfi_logic_rst);
-	printf("rtl8261: %s qdma0 rxring head=%u cpu=%u dma=%u desc[ctrl=%08x addr=%08x msg1=%08x]\n",
-	       tag ? tag : "diag", qdma0_head, qdma0_cpu_idx, qdma0_dma_idx,
+	printf("rtl8261: %s xsi ctl[gib=%08x rst=%08x int=%08x en=%08x fc=%08x fifo=%08x fault=%08x if=%08x]\n",
+	       tag ? tag : "diag", xfi_gib_cfg, xfi_logic_rst, xsi_int_sts,
+	       xsi_int_en, xsi_fc_sts, xsi_fifo_sts, xsi_fault_sts, xsi_if_sts);
+	printf("rtl8261: %s xsi tx[oct=%08x pkt=%08x mbi_eth=%08x uc=%08x mc_bc=%08x pause=%08x sof_eof=%08x bytes=%08x normal=%08x deq=%08x/%08x]\n",
+	       tag ? tag : "diag", xsi_tx_octets, xsi_tx_pkt, xsi_txmbi_eth,
+	       xsi_txmbi_uc, xsi_txmbi_mc_bc, xsi_txmbi_pause, xsi_tx_sof_eof,
+	       xsi_tx_bytes, xsi_tx_normal, xsi_tx_deq1, xsi_tx_deq2);
+	printf("rtl8261: %s xsi rx[frame=%08x oct=%08x pkt=%08x eth=%08x pause=%08x len_frag=%08x crc_coding=%08x mbi_pkt=%08x mbi_drop=%08x sof_eof=%08x mpi_sop_eop=%08x]\n",
+	       tag ? tag : "diag", xsi_rx_frame, xsi_rx_octets, xsi_rx_pkt,
+	       xsi_rx_eth, xsi_rx_pause, xsi_rx_len_frag, xsi_rx_crc_coding,
+	       xsi_rxmbi_pkt, xsi_rxmbi_drop, xsi_rx_sof_eof,
+	       xsi_rx_mpi_sop_eop);
+	printf("rtl8261: %s qdma0 cfg=%08x en[tx=%d rx=%d] busy[tx=%d rx=%d] rxring head=%u cpu=%u dma=%u desc[ctrl=%08x addr=%08x msg1=%08x]\n",
+	       tag ? tag : "diag", qdma0_cfg,
+	       !!(qdma0_cfg & GLOBAL_CFG_TX_DMA_EN_MASK),
+	       !!(qdma0_cfg & GLOBAL_CFG_RX_DMA_EN_MASK),
+	       !!(qdma0_cfg & GLOBAL_CFG_TX_DMA_BUSY_MASK),
+	       !!(qdma0_cfg & GLOBAL_CFG_RX_DMA_BUSY_MASK),
+	       qdma0_head, qdma0_cpu_idx, qdma0_dma_idx,
 	       qdma0_desc_ctrl, qdma0_desc_addr, qdma0_desc_msg1);
-	printf("rtl8261: %s qdma1 rxring head=%u cpu=%u dma=%u desc[ctrl=%08x addr=%08x msg1=%08x]\n",
-	       tag ? tag : "diag", qdma1_head, qdma1_cpu_idx, qdma1_dma_idx,
+	printf("rtl8261: %s qdma1 cfg=%08x en[tx=%d rx=%d] busy[tx=%d rx=%d] rxring head=%u cpu=%u dma=%u desc[ctrl=%08x addr=%08x msg1=%08x]\n",
+	       tag ? tag : "diag", qdma1_cfg,
+	       !!(qdma1_cfg & GLOBAL_CFG_TX_DMA_EN_MASK),
+	       !!(qdma1_cfg & GLOBAL_CFG_RX_DMA_EN_MASK),
+	       !!(qdma1_cfg & GLOBAL_CFG_TX_DMA_BUSY_MASK),
+	       !!(qdma1_cfg & GLOBAL_CFG_RX_DMA_BUSY_MASK),
+	       qdma1_head, qdma1_cpu_idx, qdma1_dma_idx,
 	       qdma1_desc_ctrl, qdma1_desc_addr, qdma1_desc_msg1);
-	printf("rtl8261: %s pkt tx[attempt=%u ok=%u err=%u ret=%d fport=%u hw=%u len=%u type=%04x dst=%pM src=%pM] rx_head[%u]=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+	printf("rtl8261: %s pkt tx[attempt=%u ok=%u err=%u ret=%d fport=%u hw=%u qdma=%u qid=%u msg0=%08x msg1=%08x len=%u type=%04x dst=%pM src=%pM] rx_head[%u]=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
 	       tag ? tag : "diag", eth->tx_attempts, eth->tx_ok, eth->tx_err,
 	       eth->last_tx_ret, eth->last_tx_fport, eth->last_tx_hw_fport,
+	       eth->last_tx_qdma, eth->last_tx_qid, eth->last_tx_msg0,
+	       eth->last_tx_msg1,
 	       eth->last_tx_len, eth->last_tx_ethertype,
 	       eth->last_tx_dst, eth->last_tx_src, eth->last_rx_head_len,
 	       eth->last_rx_head[0], eth->last_rx_head[1],
@@ -4039,11 +5161,17 @@ static int airoha_rtl8261_run_patch_table(struct airoha_eth *eth, int phy_addr,
 	size_t i;
 	int ret;
 
+	printf("rtl8261: phy%d applying %zu patch entries\n", phy_addr, n);
+
 	for (i = 0; i < n; i++) {
+		if (!(i & 0x3f))
+			printf("rtl8261: phy%d patch %zu/%zu\n", phy_addr, i, n);
 		ret = airoha_rtl8261_apply_patch(eth, phy_addr, &table[i]);
 		if (ret)
 			return ret;
 	}
+
+	printf("rtl8261: phy%d patch table complete\n", phy_addr);
 
 	return 0;
 }
@@ -4161,12 +5289,24 @@ static int airoha_rtl8261_full_patch_one(struct airoha_eth *eth, int phy_addr)
 		return 0;
 	}
 
-	ret = airoha_mdio_c45_write(eth, phy_addr, RTL8261_MMD_VEND1,
-				    RTL8261_PHY_EXT_RESET, 0x0001);
+	/* Match the vendor/Linux reset sequence before loading the PHY patch. */
+	ret = airoha_mdio_c45_write(eth, phy_addr, RTL8261_MMD_VEND2,
+				    RTL8261_PHY_VEND2_INER, 0x0000);
 	if (ret)
 		return ret;
-	ret = airoha_mdio_c45_write(eth, phy_addr, RTL8261_MMD_VEND1,
-				    RTL8261_PHY_EXT_RESET, 0x0000);
+	ret = airoha_rtl8261_vend1_modify(eth, phy_addr,
+					  RTL8261_PHY_IRQ_ENABLE, BIT(0), 0);
+	if (ret)
+		return ret;
+	ret = airoha_rtl8261_vend1_modify(eth, phy_addr,
+					  RTL8261_PHY_EXT_RESET, BIT(0), BIT(0));
+	if (ret)
+		return ret;
+
+	mdelay(30);
+
+	ret = airoha_rtl8261_vend1_modify(eth, phy_addr,
+					  RTL8261_PHY_EXT_RESET, BIT(0), 0);
 	if (ret)
 		return ret;
 
@@ -4257,10 +5397,13 @@ static int airoha_rtl8261_full_patch_one(struct airoha_eth *eth, int phy_addr)
 	 * TX-only failure on the host-facing 10G path.
 	 */
 
-	ret = airoha_rtl8261_sds_write(eth, phy_addr, 6, 3,
-				       RTL8261_PHY_SDS_XR1710G_MODE);
-	if (ret)
-		return ret;
+	if (!of_machine_is_compatible("axon,xg2010g") &&
+	    !of_machine_is_compatible("econet,xg2010g")) {
+		ret = airoha_rtl8261_sds_write(eth, phy_addr, 6, 3,
+					       RTL8261_PHY_SDS_XR1710G_MODE);
+		if (ret)
+			return ret;
+	}
 
 	ret = airoha_rtl8261_serdes_mode_update(eth, phy_addr);
 	if (ret)
@@ -4548,9 +5691,10 @@ static int airoha_forced_tx_fport(struct airoha_eth *eth)
 		return 1;
 	}
 
-	if (!strcmp(port, "2") || !strcmp(port, "wan")) {
-		eth->gdm4_link_up = false;
-		return 2;
+	if (airoha_recovery_port_is_gdm3(eth)) {
+		if (!airoha_eth_gdm3_pcs_init(eth))
+			eth->gdm3_link_up = true;
+		return AIROHA_FPORT_GDM3_PCIE;
 	}
 
 	if (airoha_recovery_port_is_gdm4(eth)) {
@@ -4576,9 +5720,16 @@ static void airoha_recovery_set_default_fport(struct airoha_eth *eth, u8 fport)
 		eth->default_tx_fport = fport;
 }
 
-static bool airoha_recovery_wan_up(struct airoha_eth *eth)
+static bool airoha_recovery_gdm3_candidate(struct airoha_eth *eth)
 {
-	return airoha_mdio_link_up(eth, 8);
+	if (!eth->gdm3_pcs_ready && airoha_eth_gdm3_pcs_init(eth))
+		return false;
+
+	return airoha_mdio_link_up(eth, eth->gdm3_phy_addr) ||
+		       (eth->pcie1_pcs_usxgmii &&
+			((airoha_rr(eth->pcie1_pcs_usxgmii,
+				    PCS_USXGMII_PCS_STUS_1) &
+			  PCS_USXGMII_PCS_RX_LINK_STATUS) != 0));
 }
 
 static bool airoha_recovery_gdm4_candidate(struct airoha_eth *eth)
@@ -4627,8 +5778,15 @@ static void airoha_gdm4_ensure_ready(struct airoha_eth *eth)
 
 static void airoha_gdm4_recovery_prime(struct airoha_eth *eth)
 {
+	if (airoha_recovery_port_is_gdm3(eth)) {
+		if (!airoha_eth_gdm3_pcs_init(eth))
+			eth->gdm3_link_up = true;
+		airoha_recovery_set_default_fport(eth, AIROHA_FPORT_GDM3_PCIE);
+		airoha_gdm3_program_src_cpu_path(eth, FE_PSE_PORT_CDM1);
+	}
+
 	if (!airoha_recovery_accept_gdm4_rx(eth))
-		return;
+		goto gdm3_path_done;
 
 	if (airoha_recovery_port_is_gdm4(eth)) {
 		u8 fport;
@@ -4645,12 +5803,15 @@ static void airoha_gdm4_recovery_prime(struct airoha_eth *eth)
 	}
 
 	airoha_gdm4_update_cpu_path(eth);
+
+gdm3_path_done:
+	airoha_gdm3_program_src_cpu_path(eth, FE_PSE_PORT_CDM1);
 }
 
 static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 {
 	bool lan_up;
-	int wan_up;
+	bool gdm3_candidate;
 	int forced_fport;
 	bool gdm4_candidate;
 	bool dual_service;
@@ -4664,7 +5825,7 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 	airoha_eth_gdm4_rxlock_workaround(eth);
 
 	lan_up = airoha_recovery_lan_up(eth);
-	wan_up = airoha_recovery_wan_up(eth);
+	gdm3_candidate = airoha_recovery_gdm3_candidate(eth);
 	gdm4_candidate = airoha_recovery_gdm4_candidate(eth);
 	dual_service = airoha_recovery_dual_service_enabled();
 
@@ -4683,16 +5844,15 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 		return 1;
 	}
 
+	if (gdm3_candidate) {
+		airoha_recovery_set_default_fport(eth, AIROHA_FPORT_GDM3_PCIE);
+		return AIROHA_FPORT_GDM3_PCIE;
+	}
+
 	if (airoha_fport_is_gdm4(eth->default_tx_fport) && gdm4_candidate) {
 		if (!dual_service)
 			airoha_gdm4_ensure_ready(eth);
 		return eth->default_tx_fport;
-	}
-
-	if (eth->default_tx_fport == 2 && wan_up) {
-		if (!dual_service)
-			eth->gdm4_link_up = false;
-		return 2;
 	}
 
 	/*
@@ -4715,20 +5875,14 @@ static u8 airoha_pick_tx_fport(struct airoha_eth *eth)
 
 	eth->gdm4_link_up = false;
 
-	if (wan_up) {
-		airoha_recovery_set_default_fport(eth, 2);
-		return 2;
-	}
-
-	if (eth->default_tx_fport == 2 ||
-	    airoha_fport_is_gdm4(eth->default_tx_fport))
+	if (airoha_fport_is_external_lan(eth->default_tx_fport))
 		return eth->default_tx_fport;
 
 	airoha_recovery_set_default_fport(eth, 1);
 	return 1;
 }
 
-static u8 airoha_encode_tx_fport(u8 fport)
+static u8 airoha_encode_tx_fport(struct airoha_eth *eth, u8 fport)
 {
 	/*
 	 * Keep 10G recovery TX on the Linux netdev-style direct GDM4 fport.
@@ -4736,7 +5890,11 @@ static u8 airoha_encode_tx_fport(u8 fport)
 	 * depend on an environment-controlled comparison path.
 	 */
 	if (airoha_fport_is_gdm4(fport))
-		return FE_PSE_PORT_GDM4;
+		return airoha_recovery_env_u8("gdm4_tx_fport",
+					      FE_PSE_PORT_GDM4,
+					      FIELD_MAX(QDMA_ETH_TXMSG_FPORT_MASK));
+	if (airoha_fport_is_gdm3(fport))
+		return FE_PSE_PORT_GDM3;
 
 	return fport;
 }
@@ -4879,6 +6037,7 @@ static int airoha_fe_init(struct airoha_eth *eth)
 	airoha_fe_crsn_qsel_init(eth);
 	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(1), FE_PSE_PORT_PPE1);
 	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(2), FE_PSE_PORT_PPE1);
+	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(3), FE_PSE_PORT_PPE1);
 	airoha_set_gdm_port_fwd_cfg(eth, REG_GDM_FWD_CFG(4), FE_PSE_PORT_PPE1);
 	/*
 	 * Linux assigns the PPE default CPU port per GDM netdev in ndo_init.
@@ -4892,21 +6051,30 @@ static int airoha_fe_init(struct airoha_eth *eth)
 			      DFT_CPORT_MASK(FE_PSE_PORT_GDM2),
 		      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM1),
 				 FE_PSE_PORT_CDM1) |
-			      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM2),
-					 FE_PSE_PORT_CDM1));
+				      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM2),
+						 FE_PSE_PORT_CDM1));
+	airoha_fe_rmw(eth, REG_PPE_DFT_CPORT(0, FE_PSE_PORT_GDM3),
+		      DFT_CPORT_MASK(FE_PSE_PORT_GDM3),
+		      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM3),
+				 FE_PSE_PORT_CDM1));
 	airoha_fe_rmw(eth, REG_PPE_DFT_CPORT(0, FE_PSE_PORT_GDM4),
 		      DFT_CPORT_MASK(FE_PSE_PORT_GDM4),
 		      FIELD_PREP(DFT_CPORT_MASK(FE_PSE_PORT_GDM4),
 				 FE_PSE_PORT_CDM1));
 	airoha_fe_clear(eth, REG_GDM_INGRESS_CFG(1), GDM_STAG_EN_MASK);
 	airoha_fe_clear(eth, REG_GDM_INGRESS_CFG(2), GDM_STAG_EN_MASK);
-	airoha_fe_clear(eth, REG_GDM_INGRESS_CFG(4), GDM_STAG_EN_MASK);
+	airoha_fe_set(eth, REG_GDM_INGRESS_CFG(3), GDM_STAG_EN_MASK);
+	airoha_fe_set(eth, REG_GDM_INGRESS_CFG(4), GDM_STAG_EN_MASK);
 	airoha_fe_rmw(
 		eth, REG_GDM_LEN_CFG(1), GDM_SHORT_LEN_MASK | GDM_LONG_LEN_MASK,
 		FIELD_PREP(GDM_SHORT_LEN_MASK, 60) |
 			FIELD_PREP(GDM_LONG_LEN_MASK, AIROHA_MAX_PACKET_SIZE));
 	airoha_fe_rmw(
 		eth, REG_GDM_LEN_CFG(2), GDM_SHORT_LEN_MASK | GDM_LONG_LEN_MASK,
+		FIELD_PREP(GDM_SHORT_LEN_MASK, 60) |
+			FIELD_PREP(GDM_LONG_LEN_MASK, AIROHA_MAX_PACKET_SIZE));
+	airoha_fe_rmw(
+		eth, REG_GDM_LEN_CFG(3), GDM_SHORT_LEN_MASK | GDM_LONG_LEN_MASK,
 		FIELD_PREP(GDM_SHORT_LEN_MASK, 60) |
 			FIELD_PREP(GDM_LONG_LEN_MASK, AIROHA_MAX_PACKET_SIZE));
 	airoha_fe_rmw(
@@ -4964,6 +6132,8 @@ static int airoha_fe_init(struct airoha_eth *eth)
 	airoha_fe_rmw(eth, REG_CDM2_FWD_CFG, CDM2_OAM_QSEL_MASK,
 		      FIELD_PREP(CDM2_OAM_QSEL_MASK, 0));
 	airoha_fe_set(eth, REG_GDM3_FWD_CFG, GDM3_PAD_EN_MASK);
+	airoha_fe_set(eth, REG_GDM_TXCHN_EN(3), BIT(eth->gdm3_tx_channel));
+	airoha_fe_set(eth, REG_GDM_RXCHN_EN(3), 0xffff);
 	airoha_fe_set(eth, REG_GDM4_FWD_CFG, GDM4_PAD_EN_MASK);
 
 	airoha_fe_clear(eth, REG_FE_CPORT_CFG, FE_CPORT_QUEUE_XFC_MASK);
@@ -4980,7 +6150,7 @@ static int airoha_fe_init(struct airoha_eth *eth)
 	return 0;
 }
 
-static void airoha_reset_ext_phys(ofnode mdio_node)
+static void airoha_reset_ext_phys(struct airoha_eth *eth, ofnode mdio_node)
 {
 	ofnode child;
 
@@ -5013,6 +6183,7 @@ static void airoha_reset_ext_phys(ofnode mdio_node)
 				deassert_us = max(deassert_us, min_reset_us);
 			}
 
+			airoha_force_gpio(eth, gpio_num);
 			airoha_gpio_direction_output(gpio_num);
 			airoha_gpio_set_active_low(gpio_num,
 						   !!(gpio_flags & BIT(0)));
@@ -5053,29 +6224,27 @@ static void airoha_enable_mdio_pins(struct airoha_eth *eth)
 		return;
 
 	/*
-	 * Match the corrected Linux pinctrl-airoha EN7581 mdio function:
-	 * - force MDC/MDIO onto GPIO1/GPIO2 through FORCE_GPIO_EN
-	 * - enable MDC master mode on REG_GPIO_2ND_I2C_MODE bit14
-	 * - clear the adjacent I2C master bit13, which shares the same mux word
-	 *
-	 * Earlier U-Boot experiments incorrectly toggled GPIO_SGMII_MDIO_MODE.
-	 * The upstream Linux fix notes the bootloader never uses that bit for
-	 * external PHY MDIO and instead forces the GPIO pair directly.
+	 * Mirror the vendor force_mdio0_en() sequence. GPIO2 must first be
+	 * detached from its LED/PWM functions and driven high before the MDIO
+	 * master takes ownership of GPIO1/GPIO2.
 	 */
+	airoha_gpio_direction_output(2);
+	airoha_gpio_set_active_low(2, 0);
+	airoha_clrsetbits_le32(GPIO_SYSCTL_BASE + GPIO_REG_LED_CTRL,
+			       BIT(4) | BIT(5), 0);
+	airoha_clrsetbits_le32(GPIO_SYSCTL_BASE + GPIO_REG_FLASH_MODE_CFG,
+			       BIT(2), 0);
+
+	regmap_update_bits(eth->chip_scu_regmap, SCU_FORCE_GPIO_EN,
+			   SCU_FORCE_GPIO1_EN | SCU_FORCE_GPIO2_EN,
+			   SCU_FORCE_GPIO1_EN | SCU_FORCE_GPIO2_EN);
+	regmap_update_bits(eth->chip_scu_regmap, SCU_GPIO_IOMUX_CTRL_2,
+			   SCU_GPIO_I2C2_MODE | SCU_GPIO_I2C1_MODE, 0);
 	regmap_update_bits(eth->chip_scu_regmap, SCU_GPIO_2ND_I2C_MODE,
 			   SCU_GPIO_MDC_IO_MASTER_MODE |
 				   SCU_GPIO_I2C_MASTER_MODE,
 			   SCU_GPIO_MDC_IO_MASTER_MODE);
-	regmap_update_bits(eth->chip_scu_regmap, SCU_FORCE_GPIO_EN,
-			   SCU_FORCE_GPIO1_EN | SCU_FORCE_GPIO2_EN,
-			   SCU_FORCE_GPIO1_EN | SCU_FORCE_GPIO2_EN);
-
-	/*
-	 * Keep GPIO2 aligned with the vendor DT pinconf state ("output-high")
-	 * so the helper/strap pin is driven once the force-gpio mux is active.
-	 */
-	airoha_gpio_direction_output(2);
-	airoha_gpio_set_active_low(2, 0);
+	udelay(100);
 }
 
 static void airoha_qdma_reset_rx_desc(struct airoha_queue *q, int index)
@@ -5450,10 +6619,10 @@ static int airoha_qdma_init(struct udevice *dev, struct airoha_eth *eth,
 	return airoha_qdma_hw_init(qdma);
 }
 
-static void airoha_recovery_runtime_reset(struct airoha_eth *eth)
+static void airoha_recovery_runtime_reset(struct airoha_eth *eth,
+					  bool clear_tx_diag)
 {
 	eth->default_tx_fport = 1;
-	eth->last_tx_fport = 0;
 	eth->last_rx_fport = 0;
 	eth->gdm4_link_up = false;
 	eth->gdm4_usb_link_up = false;
@@ -5468,15 +6637,22 @@ static void airoha_recovery_runtime_reset(struct airoha_eth *eth)
 	eth->last_rx_msg1 = 0;
 	eth->last_rx_head_len = 0;
 	memset(eth->last_rx_head, 0, sizeof(eth->last_rx_head));
-	eth->tx_attempts = 0;
-	eth->tx_ok = 0;
-	eth->tx_err = 0;
-	memset(eth->last_tx_dst, 0, sizeof(eth->last_tx_dst));
-	memset(eth->last_tx_src, 0, sizeof(eth->last_tx_src));
-	eth->last_tx_ethertype = 0;
-	eth->last_tx_len = 0;
-	eth->last_tx_hw_fport = 0;
-	eth->last_tx_ret = 0;
+	if (clear_tx_diag) {
+		eth->last_tx_fport = 0;
+		eth->tx_attempts = 0;
+		eth->tx_ok = 0;
+		eth->tx_err = 0;
+		memset(eth->last_tx_dst, 0, sizeof(eth->last_tx_dst));
+		memset(eth->last_tx_src, 0, sizeof(eth->last_tx_src));
+		eth->last_tx_ethertype = 0;
+		eth->last_tx_len = 0;
+		eth->last_tx_hw_fport = 0;
+		eth->last_tx_qdma = 0;
+		eth->last_tx_qid = 0;
+		eth->last_tx_msg0 = 0;
+		eth->last_tx_msg1 = 0;
+		eth->last_tx_ret = 0;
+	}
 	eth->peer_fport_next = 0;
 	memset(eth->peer_fport, 0, sizeof(eth->peer_fport));
 }
@@ -5545,14 +6721,15 @@ static u32 airoha_recovery_tx_msg0(struct airoha_eth *eth, int qid, u8 fport)
 {
 	u8 channel = qid / AIROHA_NUM_TX_RING;
 
-	/*
-	 * Keep descriptor metadata aligned with the actual TX ring, matching the
-	 * Linux driver layout used by the GDM4 netdev.
-	 */
-	if (fport == AIROHA_FPORT_GDM4_USB && eth->gdm4_dual_hsgmii)
+	/* Match the stock XSI netdev routing for each external endpoint. */
+	if (fport == AIROHA_FPORT_GDM4_ETH)
+		channel = airoha_recovery_env_u8(
+			"gdm4_tx_channel", eth->gdm4_tx_channel,
+			FIELD_MAX(QDMA_ETH_TXMSG_CHAN_MASK));
+	else if (fport == AIROHA_FPORT_GDM4_USB && eth->gdm4_dual_hsgmii)
 		channel = eth->gdm4_usb_tx_channel;
-	else if (fport == AIROHA_FPORT_GDM4_ETH)
-		channel = eth->gdm4_tx_channel;
+	else if (fport == AIROHA_FPORT_GDM3_PCIE)
+		channel = eth->gdm3_tx_channel;
 
 	return FIELD_PREP(QDMA_ETH_TXMSG_CHAN_MASK, channel) |
 	       FIELD_PREP(QDMA_ETH_TXMSG_QUEUE_MASK, qid % AIROHA_NUM_TX_RING);
@@ -5586,8 +6763,8 @@ static int airoha_hw_init(struct udevice *dev, struct airoha_eth *eth)
 		return ret;
 
 	if ((eth->gdm4_usb_hsgmii || eth->gdm4_dual_hsgmii) &&
-	    eth->chip_scu_regmap)
-		regmap_update_bits(eth->chip_scu_regmap, SCU_SSR3,
+	    eth->scu_regmap)
+		regmap_update_bits(eth->scu_regmap, SCU_SSR3,
 				   SCU_USB0_SERDES_SEL, 0);
 
 	if (!eth->gdm4_usb_hsgmii && eth->scu_regmap) {
@@ -5616,6 +6793,10 @@ static int airoha_hw_init(struct udevice *dev, struct airoha_eth *eth)
 	}
 
 	ret = airoha_eth_gdm4_pcs_init(eth);
+	if (ret)
+		return ret;
+
+	ret = airoha_eth_gdm3_pcs_init(eth);
 	if (ret)
 		return ret;
 
@@ -5720,46 +6901,58 @@ static int airoha_switch_init(struct udevice *dev, struct airoha_eth *eth)
 	}
 
 	if (eth->gdm4_usb_hsgmii) {
-		if (!eth->mdio_dev)
-			return -ENODEV;
-
-		eth->gdm4_phy = dm_mdio_phy_connect(eth->mdio_dev,
-						    eth->gdm4_phy_addr, dev,
-						    PHY_INTERFACE_MODE_2500BASEX);
-		if (!eth->gdm4_phy)
-			return -ENODEV;
-
-		eth->gdm4_phy->node = eth->gdm4_phy_node;
-		ret = phy_config(eth->gdm4_phy);
-		if (ret)
-			return ret;
-
-		ret = phy_startup(eth->gdm4_phy);
-		if (ret)
-			return ret;
+		if (!eth->mdio_dev) {
+			printf("gdm4: external MDIO unavailable; keeping switch LAN enabled\n");
+		} else {
+			eth->gdm4_phy = dm_mdio_phy_connect(
+				eth->mdio_dev, eth->gdm4_phy_addr, dev,
+				PHY_INTERFACE_MODE_2500BASEX);
+			if (!eth->gdm4_phy) {
+				printf("gdm4: PHY%d unavailable; keeping switch LAN enabled\n",
+				       eth->gdm4_phy_addr);
+			} else {
+				eth->gdm4_phy->node = eth->gdm4_phy_node;
+				ret = phy_config(eth->gdm4_phy);
+				if (!ret)
+					ret = phy_startup(eth->gdm4_phy);
+				if (ret) {
+					printf("gdm4: PHY%d initialization failed: %d; keeping switch LAN enabled\n",
+					       eth->gdm4_phy_addr, ret);
+					eth->gdm4_phy = NULL;
+				}
+			}
+		}
 	} else {
-		airoha_rtl8261_minimal_init(eth);
+		if (airoha_rtl8261_patch_autoload_enabled()) {
+			printf("rtl8261: automatic PHY patch enabled\n");
+			airoha_rtl8261_minimal_init(eth);
+		} else {
+			printf("rtl8261: PHY patch deferred (use rtl8261_patch)\n");
+		}
 	}
 
 	if (eth->gdm4_dual_hsgmii) {
-		if (!eth->mdio_dev)
-			return -ENODEV;
-
-		eth->gdm4_usb_phy =
-			dm_mdio_phy_connect(eth->mdio_dev,
-					    eth->gdm4_usb_phy_addr, dev,
-					    PHY_INTERFACE_MODE_2500BASEX);
-		if (!eth->gdm4_usb_phy)
-			return -ENODEV;
-
-		eth->gdm4_usb_phy->node = eth->gdm4_usb_phy_node;
-		ret = phy_config(eth->gdm4_usb_phy);
-		if (ret)
-			return ret;
-
-		ret = phy_startup(eth->gdm4_usb_phy);
-		if (ret)
-			return ret;
+		if (!eth->mdio_dev) {
+			printf("gdm4-usb: external MDIO unavailable; keeping switch LAN enabled\n");
+		} else {
+			eth->gdm4_usb_phy = dm_mdio_phy_connect(
+				eth->mdio_dev, eth->gdm4_usb_phy_addr, dev,
+				PHY_INTERFACE_MODE_2500BASEX);
+			if (!eth->gdm4_usb_phy) {
+				printf("gdm4-usb: PHY%d unavailable; keeping switch LAN enabled\n",
+				       eth->gdm4_usb_phy_addr);
+			} else {
+				eth->gdm4_usb_phy->node = eth->gdm4_usb_phy_node;
+				ret = phy_config(eth->gdm4_usb_phy);
+				if (!ret)
+					ret = phy_startup(eth->gdm4_usb_phy);
+				if (ret) {
+					printf("gdm4-usb: PHY%d initialization failed: %d; keeping switch LAN enabled\n",
+					       eth->gdm4_usb_phy_addr, ret);
+					eth->gdm4_usb_phy = NULL;
+				}
+			}
+		}
 	}
 
 	return 0;
@@ -5773,6 +6966,10 @@ static int airoha_eth_probe(struct udevice *dev)
 	struct regmap *chip_scu_regmap;
 	struct regmap *scu_regmap;
 	int i, ret;
+	bool debug_prompt = env_get_yesno("xg2010g_debug_prompt") == 1;
+
+	if (debug_prompt)
+		printf("xg2010g-net: probe begin\n");
 
 	scu_regmap = airoha_get_scu_regmap();
 	if (IS_ERR(scu_regmap))
@@ -5802,6 +6999,8 @@ static int airoha_eth_probe(struct udevice *dev)
 	ret = airoha_eth_gdm4_parse_config(dev, eth);
 	if (ret)
 		return ret;
+	if (debug_prompt)
+		printf("xg2010g-net: config parsed\n");
 
 	eth->rsts.resets = devm_kcalloc(dev, AIROHA_MAX_NUM_RSTS,
 					sizeof(struct reset_ctl), GFP_KERNEL);
@@ -5832,6 +7031,10 @@ static int airoha_eth_probe(struct udevice *dev)
 					&eth->xsi_rsts.resets[i]);
 		if (ret)
 			return ret;
+		if (!strcmp(data->xsi_rsts_names[i], "hsi1-phy"))
+			eth->gdm3_pcs_phy_rst = &eth->xsi_rsts.resets[i];
+		else if (!strcmp(data->xsi_rsts_names[i], "hsi1-mac"))
+			eth->gdm3_pcs_mac_rst = &eth->xsi_rsts.resets[i];
 	}
 
 	switch_node =
@@ -5849,6 +7052,8 @@ static int airoha_eth_probe(struct udevice *dev)
 	ret = airoha_hw_init(dev, eth);
 	if (ret)
 		return ret;
+	if (debug_prompt)
+		printf("xg2010g-net: hw init complete\n");
 
 	switch_node =
 		ofnode_by_compatible(ofnode_null(), data->switch_compatible);
@@ -5856,10 +7061,31 @@ static int airoha_eth_probe(struct udevice *dev)
 		ofnode mdio_node = airoha_ext_mdio_node(dev);
 
 		if (ofnode_valid(mdio_node))
-			airoha_reset_ext_phys(mdio_node);
+			airoha_reset_ext_phys(eth, mdio_node);
+	}
+	if (debug_prompt)
+		printf("xg2010g-net: external PHY reset complete\n");
+
+	ret = airoha_switch_init(dev, eth);
+	if (ret)
+		return ret;
+	if (debug_prompt)
+		printf("xg2010g-net: switch init complete\n");
+
+	/*
+	 * hw_init() brings PCIe1 up before switch_init() has reset and patched
+	 * the RTL8261s. Unlike GDM4, GDM3 has no later link-up path that reruns
+	 * its PCS setup. Replay the existing PCIe1 reset and bring-up sequence
+	 * after PHY8 has reached its final board-specific SerDes configuration.
+	 */
+	if (eth->rtl8261_init_done && eth->gdm3_pcs_ready) {
+		eth->gdm3_pcs_ready = false;
+		ret = airoha_eth_gdm3_pcs_init(eth);
+		if (ret)
+			return ret;
 	}
 
-	return airoha_switch_init(dev, eth);
+	return 0;
 }
 
 static int airoha_eth_init(struct udevice *dev)
@@ -5867,7 +7093,7 @@ static int airoha_eth_init(struct udevice *dev)
 	struct airoha_eth *eth = dev_get_priv(dev);
 	int i, qid, ret;
 
-	airoha_recovery_runtime_reset(eth);
+	airoha_recovery_runtime_reset(eth, true);
 	airoha_switch_recovery_quiesce(eth);
 	airoha_fe_recovery_runtime_stop(eth);
 	airoha_recovery_lan_phy_set_power(eth, false);
@@ -5937,7 +7163,8 @@ static void airoha_eth_stop(struct udevice *dev)
 	}
 
 	airoha_recovery_lan_phy_set_power(eth, false);
-	airoha_recovery_runtime_reset(eth);
+	/* Keep the last submitted TX descriptor visible to rtl8261_diag. */
+	airoha_recovery_runtime_reset(eth, false);
 }
 
 static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
@@ -5970,7 +7197,7 @@ static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 	eth->last_tx_fport = fport;
 	eth->last_tx_len = tx_length;
 	eth->last_tx_ret = -EINPROGRESS;
-	eth->last_tx_hw_fport = airoha_encode_tx_fport(fport);
+	eth->last_tx_hw_fport = airoha_encode_tx_fport(eth, fport);
 	eth->tx_attempts++;
 	if (length >= ETH_HLEN) {
 		const u8 *eth_hdr = packet;
@@ -5987,6 +7214,8 @@ static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 	qdma = airoha_active_tx_qdma(eth, fport);
 
 	qid = airoha_recovery_tx_qid(eth, fport);
+	eth->last_tx_qdma = qdma - &eth->qdma[0];
+	eth->last_tx_qid = qid;
 	q = &qdma->q_tx[qid];
 	desc = &q->desc[q->head];
 	if (q->pending) {
@@ -6014,6 +7243,16 @@ static int airoha_eth_send_on_fport(struct udevice *dev, void *packet,
 	       FIELD_PREP(QDMA_ETH_TXMSG_METER_MASK, 0x7f);
 	if (fport == AIROHA_FPORT_GDM4_USB && eth->gdm4_dual_hsgmii)
 		msg1 |= FIELD_PREP(QDMA_ETH_TXMSG_NBOQ_MASK, 1);
+	else if (fport == AIROHA_FPORT_GDM4_ETH)
+		msg1 |= FIELD_PREP(
+			QDMA_ETH_TXMSG_NBOQ_MASK,
+			airoha_recovery_env_u8(
+				"gdm4_tx_nboq", 0,
+				FIELD_MAX(QDMA_ETH_TXMSG_NBOQ_MASK)));
+	else if (fport == AIROHA_FPORT_GDM3_PCIE)
+		msg1 |= FIELD_PREP(QDMA_ETH_TXMSG_NBOQ_MASK, eth->gdm3_nboq);
+	eth->last_tx_msg0 = msg0;
+	eth->last_tx_msg1 = msg1;
 
 	val = FIELD_PREP(QDMA_DESC_LEN_MASK, tx_length);
 	WRITE_ONCE(desc->ctrl, cpu_to_le32(val));
@@ -6059,6 +7298,11 @@ static u8 airoha_pick_packet_tx_fport(struct airoha_eth *eth,
 		return 0;
 
 	fport = airoha_peer_fport_lookup(eth, packet);
+	if (airoha_fport_is_gdm3(fport)) {
+		if (airoha_recovery_accept_gdm3_rx(eth))
+			return fport;
+		fport = 0;
+	}
 	if (airoha_fport_is_gdm4(fport)) {
 		if (airoha_recovery_accept_gdm4_rx(eth)) {
 			airoha_gdm4_ensure_ready(eth);
@@ -6077,7 +7321,7 @@ static int airoha_eth_send(struct udevice *dev, void *packet, int length)
 {
 	struct airoha_eth *eth = dev_get_priv(dev);
 	bool dual_service = airoha_recovery_dual_service_enabled();
-	bool send_lan = false, send_gdm4 = false;
+	bool send_lan = false, send_gdm3 = false, send_gdm4 = false;
 	int attempts = 0, successes = 0;
 	int first_err = -EAGAIN;
 	u8 fport;
@@ -6097,7 +7341,10 @@ static int airoha_eth_send(struct udevice *dev, void *packet, int length)
 		 * the GDM4/USXGMII link status can lag behind usable RX.
 		 */
 		send_lan = true;
+		send_gdm3 = airoha_recovery_accept_gdm3_rx(eth);
 		send_gdm4 = airoha_recovery_accept_gdm4_rx(eth);
+		if (send_gdm3 && airoha_recovery_gdm3_candidate(eth))
+			eth->gdm3_link_up = true;
 		if (send_gdm4 && airoha_recovery_gdm4_candidate(eth))
 			airoha_gdm4_ensure_ready(eth);
 
@@ -6115,6 +7362,16 @@ static int airoha_eth_send(struct udevice *dev, void *packet, int length)
 			ret = airoha_eth_send_on_fport(dev,
 						       packet, length,
 						       AIROHA_FPORT_GDM4_ETH);
+			if (!ret)
+				successes++;
+			else if (first_err == -EAGAIN)
+				first_err = ret;
+		}
+
+		if (send_gdm3) {
+			attempts++;
+			ret = airoha_eth_send_on_fport(dev, packet, length,
+						       AIROHA_FPORT_GDM3_PCIE);
 			if (!ret)
 				successes++;
 			else if (first_err == -EAGAIN)
@@ -6259,8 +7516,16 @@ static int airoha_eth_recv_qdma(struct airoha_eth *eth, struct airoha_qdma *qdma
 	 * of dropping them unconditionally in U-Boot.
 	 */
 	if ((desc_ctrl & QDMA_DESC_DROP_MASK) &&
-	    !(airoha_recovery_accept_gdm4_rx(eth) &&
-	      airoha_sport_is_gdm4(eth, sport))) {
+	    !((airoha_recovery_accept_gdm4_rx(eth) &&
+	       (airoha_sport_is_gdm4(eth, sport) ||
+	        (airoha_recovery_port_is_gdm4(eth) &&
+	         eth->last_rx_fport == AIROHA_FPORT_GDM4_ETH) ||
+	        (airoha_recovery_port_is_gdm4_usb(eth) &&
+	         eth->last_rx_fport == AIROHA_FPORT_GDM4_USB))) ||
+	      (airoha_recovery_accept_gdm3_rx(eth) &&
+	       (airoha_sport_is_gdm3(eth, sport) ||
+	        (airoha_recovery_port_is_gdm3(eth) &&
+	         eth->last_rx_fport == AIROHA_FPORT_GDM3_PCIE))))) {
 		airoha_qdma_recycle_rx_desc(qdma, q, qid);
 		return -EAGAIN;
 	}
@@ -6387,15 +7652,6 @@ static int airoha_eth_bind(struct udevice *dev)
 			debug("Warning: failed to bind switch mdio controller\n");
 	}
 
-	mdio_node = airoha_ext_mdio_node(dev);
-	if (ofnode_valid(mdio_node) && CONFIG_IS_ENABLED(MDIO_AIROHA_ARHT)) {
-		ret = device_bind_driver_to_node(dev, "airoha-arht-mdio",
-						 "ext-mdio", mdio_node,
-						 &mdio_dev);
-		if (ret)
-			debug("Warning: failed to bind external mdio controller\n");
-	}
-
 	return 0;
 }
 
@@ -6465,8 +7721,101 @@ static int do_rtl8261_diag(struct cmd_tbl *cmdtp, int flag, int argc,
 	return 0;
 }
 
+static int do_xg2010g_net_init(struct cmd_tbl *cmdtp, int flag, int argc,
+			       char *const argv[])
+{
+	if (argc != 1)
+		return CMD_RET_USAGE;
+
+	if (!of_machine_is_compatible("axon,xg2010g") &&
+	    !of_machine_is_compatible("econet,xg2010g")) {
+		printf("xg2010g_net_init is only available on XG2010G\n");
+		return CMD_RET_FAILURE;
+	}
+
+	printf("xg2010g-net: starting deferred eth_initialize\n");
+	return eth_initialize() > 0 ? CMD_RET_SUCCESS : CMD_RET_FAILURE;
+}
+
+static int do_rtl8261_patch(struct cmd_tbl *cmdtp, int flag, int argc,
+			    char *const argv[])
+{
+	struct udevice *dev = eth_get_dev();
+	struct airoha_eth *eth;
+	bool patch5 = true, patch8 = true;
+	int ret;
+
+	if (argc > 2)
+		return CMD_RET_USAGE;
+
+	if (argc == 2) {
+		if (!strcmp(argv[1], "5"))
+			patch8 = false;
+		else if (!strcmp(argv[1], "8"))
+			patch5 = false;
+		else if (strcmp(argv[1], "all"))
+			return CMD_RET_USAGE;
+	}
+
+	if (!dev) {
+		printf("rtl8261: no active ethernet device\n");
+		return CMD_RET_FAILURE;
+	}
+
+	eth = dev_get_priv(dev);
+	if (!eth || !eth->mdio_dev) {
+		printf("rtl8261: external MDIO is unavailable\n");
+		return CMD_RET_FAILURE;
+	}
+
+	if (patch5) {
+		printf("rtl8261: starting PHY5 patch\n");
+		ret = airoha_rtl8261_full_patch_one(eth, RTL8261_PHY5_ADDR);
+		if (ret) {
+			printf("rtl8261: PHY5 patch failed: %d\n", ret);
+			return CMD_RET_FAILURE;
+		}
+	}
+
+	if (patch8) {
+		printf("rtl8261: starting PHY8 patch\n");
+		ret = airoha_rtl8261_full_patch_one(eth, RTL8261_PHY8_ADDR);
+		if (ret) {
+			printf("rtl8261: PHY8 patch failed: %d\n", ret);
+			return CMD_RET_FAILURE;
+		}
+	}
+
+	if (patch5 && patch8)
+		eth->rtl8261_init_done = true;
+
+	if (eth->rtl8261_init_done && eth->gdm3_pcs_ready) {
+		eth->gdm3_pcs_ready = false;
+		ret = airoha_eth_gdm3_pcs_init(eth);
+		if (ret) {
+			printf("rtl8261: PCIe1 PCS replay failed: %d\n", ret);
+			return CMD_RET_FAILURE;
+		}
+	}
+
+	printf("rtl8261: requested PHY patch complete\n");
+	return 0;
+}
+
 U_BOOT_CMD(
 	rtl8261_diag, 1, 1, do_rtl8261_diag,
-	"dump rtl8261/usxgmii/gdm4 diagnostic state",
+	"dump external LAN PHY/PCS/GDM/QDMA diagnostic state",
 	""
+);
+
+U_BOOT_CMD(
+	xg2010g_net_init, 1, 0, do_xg2010g_net_init,
+	"initialize XG2010G Ethernet on demand (debug prompt)",
+	""
+);
+
+U_BOOT_CMD(
+	rtl8261_patch, 2, 0, do_rtl8261_patch,
+	"apply the external RTL8261 PHY patch (deferred by default)",
+	"[5|8|all]"
 );

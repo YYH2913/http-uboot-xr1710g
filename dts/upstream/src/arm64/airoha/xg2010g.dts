@@ -146,7 +146,6 @@
 		partition@600000 {
 			label = "chainloader";
 			reg = <0x00600000 0x00100000>;
-			read-only;
 		};
 
 		partition@700000 {

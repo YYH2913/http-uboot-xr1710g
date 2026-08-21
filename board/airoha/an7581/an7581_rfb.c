@@ -892,9 +892,16 @@ int board_late_init(void)
 	char boot_ubi[64];
 	const char *ubi_part;
 	ulong recovery_addr;
+	bool xg2010g_debug = env_get_yesno("xg2010g_debug_prompt") == 1;
+
+	if (xg2010g_is_compatible() && xg2010g_debug)
+		puts("xg2010g-init: board_late begin\n");
 
 	if (xg2010g_is_compatible()) {
 		xg2010g_sync_runtime_ethaddrs();
+		/* Keep RAM-only chainloader diagnostics out of auto-recovery. */
+		if (xg2010g_debug)
+			env_set("bootdelay", "-1");
 	} else if (xr1710g_is_compatible()) {
 		xr1710g_sync_runtime_ethaddrs();
 		ubi_part = xr1710g_detect_ubi_part();
@@ -905,8 +912,11 @@ int board_late_init(void)
 			xr1710g_sync_factory_part(ubi_part);
 	}
 
-	if (!an7581_recovery_button_pressed())
+	if (!an7581_recovery_button_pressed()) {
+		if (xg2010g_is_compatible() && xg2010g_debug)
+			puts("xg2010g-init: board_late done\n");
 		return 0;
+	}
 
 	printf("Recovery button detected, starting web recovery...\n");
 	env_set("ipaddr", "192.168.255.1");

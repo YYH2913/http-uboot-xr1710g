@@ -217,7 +217,7 @@ button,input,select{font:inherit;letter-spacing:0}
 }
 .file-help.ok{color:var(--green)}
 .file-help.error{color:var(--red)}
-.upload-wrap{display:flex;justify-content:center;margin-top:20px}
+.upload-wrap{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin-top:20px}
 .upload-button{
   min-width:160px;
   min-height:46px;
@@ -234,6 +234,8 @@ button,input,select{font:inherit;letter-spacing:0}
 }
 .upload-button:hover:not(:disabled){background:var(--blue-dark);transform:translateY(-1px);box-shadow:0 9px 22px rgba(40,120,227,.24)}
 .upload-button:disabled{cursor:default;opacity:.42;box-shadow:none}
+.self-write-button{color:var(--blue-dark);border-color:#9abfee;background:#f5f9ff;box-shadow:none}
+.self-write-button:hover:not(:disabled){color:#ffffff}
 .progress-section{
   margin-top:28px;
   padding-top:22px;
@@ -382,6 +384,7 @@ button,input,select{font:inherit;letter-spacing:0}
 
           <div class='upload-wrap'>
             <button class='upload-button' id='upload-button' type='button' disabled>Upload and Recover</button>
+            <button class='upload-button self-write-button' id='self-write-button' type='button' hidden>Install Running Image</button>
           </div>
 
           <section class='progress-section' aria-label='Recovery progress'>
@@ -428,6 +431,7 @@ var activeTarget='firmware';
 var selectedLayout='2.0';
 var rawFirmware=false;
 var fixedUbiLayout=false;
+var selfWriteAvailable=false;
 var selectedFile=null;
 var busy=false;
 var pollTimer=null;
@@ -447,13 +451,13 @@ var profiles={
   },
   uboot:{
     title:'Update U-Boot',
-	    copy:'Upload a packaged chainloader image. Only the raw U-Boot slot will be written.',
+	    copy:'Upload a bare XG2010G FIT or a legacy packaged slot. The device normalizes it to the bootable FIT slot.',
     target:'SPI-NAND @ 0x600000',
-    scope:'Write the 1 MiB chainloader slot',
+    scope:'Erase the 1 MiB chainloader window and write FIT at offset 0',
     preserve:'All UBI firmware volumes and configuration data',
-    help:'U-Boot images must not exceed 1 MiB',
+    help:'Upload a FIT, or a legacy slot containing a FIT at offset 0x2100; the stored image is a raw FIT',
     action:'Upload and Update',
-    notices:['Do not power off the device during the U-Boot update.','The image format is validated before writing.','UBI firmware volumes are not modified.']
+    notices:['Do not power off the device during the U-Boot update.','FIT and legacy slot formats are validated before writing.','Only the chainloader partition is modified; UBI firmware volumes are not touched.']
   }
 };
 
@@ -468,6 +472,7 @@ var chooseButton=document.getElementById('choose-button');
 var fileName=document.getElementById('file-name');
 var fileHelp=document.getElementById('file-help');
 var uploadButton=document.getElementById('upload-button');
+var selfWriteButton=document.getElementById('self-write-button');
 var layoutBlock=document.getElementById('layout-block');
 var layoutSelect=document.getElementById('layout-select');
 var layoutHelp=document.getElementById('layout-help');
@@ -505,6 +510,7 @@ function setTarget(target){
   document.getElementById('preserve-value').textContent=p.preserve;
   fileHelp.textContent=p.help;
   uploadButton.textContent=p.action;
+  selfWriteButton.hidden=target!=='uboot'||!selfWriteAvailable;
   var list=document.getElementById('notice-list');
   list.textContent='';
 	  for(var n=0;n<p.notices.length;n++){
@@ -559,7 +565,8 @@ function setBusy(value){
   chooseButton.disabled=value;
   var buttons=document.querySelectorAll('.nav-button');
 	  for(var i=0;i<buttons.length;i++)buttons[i].disabled=value;
-	  layoutSelect.disabled=value;
+  layoutSelect.disabled=value;
+  selfWriteButton.disabled=value;
   validateFile();
 }
 
@@ -679,6 +686,37 @@ async function upload(){
   xhr.send(payload);
 }
 
+function installRunningImage(){
+  if(busy||activeTarget!=='uboot'||!selfWriteAvailable)return;
+  if(!window.confirm('Install the running chainloader into the 1 MiB NAND slot?'))return;
+  setBusy(true);
+  resetProgress();
+  pollEpoch++;
+  pollOutcome=0;
+  setProgress('upload',100,'complete');
+  setState('Validating','working','Validating the running chainloader FIT.');
+
+  var xhr=new XMLHttpRequest();
+  xhr.addEventListener('load',function(){
+    if(xhr.status<200||xhr.status>=300){
+      setState('Rejected','error','The running image could not be validated.');
+      setBusy(false);
+      return;
+    }
+    setState('Processing','working','Waiting for erase and verified write operations.');
+    var epoch=pollEpoch;
+    pollTimer=setInterval(function(){pollStatus(epoch)},500);
+    setTimeout(function(){pollStatus(epoch)},100);
+  });
+  xhr.addEventListener('error',function(){
+    setState('Network Error','error','The install request failed.');
+    setBusy(false);
+  });
+  xhr.open('POST','/action/self-write',true);
+  xhr.setRequestHeader('Content-Type','text/plain');
+  xhr.send('XG2010G_INSTALL');
+}
+
 var navButtons=document.querySelectorAll('.nav-button');
 for(var i=0;i<navButtons.length;i++){
   navButtons[i].addEventListener('click',function(){setTarget(this.getAttribute('data-target'))});
@@ -692,6 +730,7 @@ layoutSelect.addEventListener('change',function(){
   resetProgress();
 });
 uploadButton.addEventListener('click',upload);
+selfWriteButton.addEventListener('click',installRunningImage);
 
 (async function(){
   setTarget('firmware');
@@ -701,6 +740,7 @@ uploadButton.addEventListener('click',upload);
 	    if(data&&data.board){
 	      document.getElementById('brand-name').textContent=data.board+' Recovery Mode';
 	      document.title=data.board+' Recovery Mode';
+	      selfWriteAvailable=data.board==='XG2010G';
 	    }
 	    if(data&&data.board==='XG2010G'&&data.firmware_mode==='ubi'){
 	      fixedUbiLayout=true;
