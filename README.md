@@ -1,4 +1,51 @@
-# XR1710G U-Boot
+# Airoha AN7581 U-Boot
+
+This tree contains customized U-Boot ports for the XG2010G and XR1710G.
+
+## XG2010G
+
+The XG2010G build is a second-stage U-Boot chainloader. The vendor ECNT/AXON
+U-Boot remains the first stage and loads a bare FIT from the dedicated 1 MiB
+window at SPI-NAND `0x600000..0x700000`. It does not replace the vendor U-Boot,
+FIP, BL31, or secure-boot certificates.
+
+Current verified artifact:
+
+```text
+../chainloader/xg2010g-chainloader-web-final.itb
+size:   1027898 bytes (0xfaf3a)
+sha256: 04e79adde1af9db9970a9922a619b13d52776061de7ab937752a30bd3b029ab1
+```
+
+Build it with:
+
+```sh
+cd ../chainloader
+./build-web.sh
+```
+
+The output must remain a bare FIT with magic `d00dfeed` at offset 0 and must
+not exceed 1 MiB. Do not flash `u-boot.bin` or `u-boot.img` directly. Routine
+updates use the second-stage HTTP Recovery U-Boot target at
+`http://192.168.255.1/`; they do not require `saveenv`.
+
+The current port mapping is:
+
+- `lan1`: 10G through RTL8261 PHY5
+- `lan2`: PCIe1 path through RTL8261 PHY8
+- `lan3`: 2.5G through EN8811H
+- `lan4`: 1G through internal switch port4 / PHY12
+
+v43 fixes LAN4 recovery by using switch mask `0x10` and PHY mask `0x1000`
+instead of the old port1/2 and PHY9/10 assumptions. The mapping and forced
+switch transmit route are verified; a LAN4 client DHCP lease and HTTP request
+remain the final end-to-end acceptance test.
+
+See [the XG2010G chainloader guide](../chainloader/README.md) for build,
+installation, recovery-port selection, TFTP/YModem validation, diagnostics,
+and flash safety boundaries.
+
+## XR1710G
 
 This is a customized U-Boot port for the XR1710G. Its main features are:
 

@@ -1940,8 +1940,8 @@ static bool airoha_eth_gdm3_pr_calibrate(struct airoha_eth *eth, int attempt)
 	mdelay(5);
 
 	freqdet = airoha_rr(pma, PCS_PMA_RX_FREQDET);
-	printf("gdm3-pcie1: PR calibration try=%d idac=%03x fl_out=%04x freqdet=%08x\n",
-	       attempt, idac, fl_out, freqdet);
+	debug("gdm3-pcie1: PR calibration try=%d idac=%03x fl_out=%04x freqdet=%08x\n",
+	      attempt, idac, fl_out, freqdet);
 
 	return calibrated;
 }
@@ -2517,8 +2517,8 @@ static void airoha_recovery_flush_fdb_on_port_move(struct airoha_eth *eth,
 		    AIROHA_RECOVERY_FDB_MOVE_FLUSH_MS)
 		return;
 
-	printf("airoha: recovery %s moved fport %u->%u, flushing switch FDB\n",
-	       reason, old_fport, new_fport);
+	debug("airoha: recovery %s moved fport %u->%u, flushing switch FDB\n",
+	      reason, old_fport, new_fport);
 	airoha_switch_fdb_flush(eth);
 	airoha_recovery_fdb_flush_ms = get_timer(0);
 }
@@ -5177,17 +5177,17 @@ static int airoha_rtl8261_run_patch_table(struct airoha_eth *eth, int phy_addr,
 	size_t i;
 	int ret;
 
-	printf("rtl8261: phy%d applying %zu patch entries\n", phy_addr, n);
+	debug("rtl8261: phy%d applying %zu patch entries\n", phy_addr, n);
 
 	for (i = 0; i < n; i++) {
 		if (!(i & 0x3f))
-			printf("rtl8261: phy%d patch %zu/%zu\n", phy_addr, i, n);
+			debug("rtl8261: phy%d patch %zu/%zu\n", phy_addr, i, n);
 		ret = airoha_rtl8261_apply_patch(eth, phy_addr, &table[i]);
 		if (ret)
 			return ret;
 	}
 
-	printf("rtl8261: phy%d patch table complete\n", phy_addr);
+	debug("rtl8261: phy%d patch table complete\n", phy_addr);
 
 	return 0;
 }
@@ -6959,10 +6959,10 @@ static int airoha_switch_init(struct udevice *dev, struct airoha_eth *eth)
 		}
 	} else {
 		if (airoha_rtl8261_patch_autoload_enabled()) {
-			printf("rtl8261: automatic PHY patch enabled\n");
+			debug("rtl8261: automatic PHY patch enabled\n");
 			airoha_rtl8261_minimal_init(eth);
 		} else {
-			printf("rtl8261: PHY patch deferred (use rtl8261_patch)\n");
+			debug("rtl8261: PHY patch deferred (use rtl8261_patch)\n");
 		}
 	}
 

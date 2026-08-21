@@ -446,10 +446,6 @@ static int should_load_env(void)
 
 static int initr_env(void)
 {
-	if (of_machine_is_compatible("axon,xg2010g") ||
-	    of_machine_is_compatible("econet,xg2010g"))
-		puts("xg2010g-init: env begin\n");
-
 	/* initialize environment */
 	if (should_load_env())
 		env_relocate();
