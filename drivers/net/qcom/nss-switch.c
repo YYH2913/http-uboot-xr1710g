@@ -2118,7 +2118,7 @@ void ipq_ppe_provision_init(struct ppe_info *info)
 	/* Dropping all the UDP packets */
 	ipq_ppe_acl_set(&acl_set);
 
-	if (IS_ENABLED(CONFIG_TFTP_PORT)) {
+	if (IS_ENABLED(CONFIG_CMD_TFTPBOOT)) {
 		tftp_acl_our_port = 1024 + (get_timer(0) % 3072);
 
 		UPDATE_ACL_SET(acl_set, reg_base, 3, 0x4, 0x1,
@@ -5946,7 +5946,7 @@ static int ipq_eth_start(struct udevice *dev)
 	if (priv->ppe.bridge_mode)
 		priv->ppe.nbport = 0;
 
-	if (IS_ENABLED(CONFIG_TFTP_PORT))
+	if (IS_ENABLED(CONFIG_CMD_TFTPBOOT))
 		env_set_ulong("tftpsrcp", tftp_acl_our_port);
 
 	/* HTTP recovery sets eth_allow_no_link and does not need link chatter. */
